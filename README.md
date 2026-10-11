@@ -19,13 +19,23 @@
 
 ## 安装
 
+本插件是**标准 DSH bundle**：`package.json` 声明 `dsh.bundle.patch`，包内自带 `cordis.patch.yml`。
+
 ```bash
-# 本地开发（软链，改代码后仍需重启 DSH）
-dsh plugin --profile <profile> add F:\0dsh\插件开发\plugins\dsh-achievements
+# 从 GitHub 安装（把 <owner> 换成你的 GitHub 用户名）
+# 应用内的插件市场/插件管理同样接受 github: 来源——它就是在 profile 目录里跑 pnpm add
+pnpm add "github:<owner>/dsh-achievements"
+
+# 本地开发：软链到本仓库，改代码后仍**需要重启** DSH
+dsh plugin --profile <profile> add /path/to/dsh-achievements
 
 # 卸载
 dsh plugin --profile <profile> remove dsh-achievements
 ```
+
+> ⚠️ 用 **桌面应用（Electron）** 时，它的 `desktop` profile 由应用独占管理，
+> `dsh plugin` 命令会直接拒绝（`profile "desktop" is managed exclusively by the Electron application`）。
+> 这种情况下请用**应用内的插件市场/插件管理**安装（来源填 `github:<owner>/dsh-achievements`）。
 
 **必须重启 DSH**：已安装插件没有热重载（typert loader 的包判定永不失效），
 Host 加载、typert 注册、client bundle 注入都发生在启动时。
