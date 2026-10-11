@@ -1,6 +1,6 @@
 {
   "name": "dsh-achievements",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Personal achievements dashboard for DeepSeek Harness: a full-page profile (cumulative tokens, peak usage, longest task, longest/current streak) plus a Token activity view with a contribution heatmap. Built on the official session-projection seam.",
   "keywords": ["dsh", "deepseek-harness", "plugin", "achievements", "profile", "token", "stats"],
   "type": "module",

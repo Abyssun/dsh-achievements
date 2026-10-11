@@ -187,5 +187,23 @@ for (const scenario of [
   ok(`${scenario.label} → apply() 仍不 reject`, rejected === null, rejected && rejected.message);
 }
 
+console.log("=== 4. 顶层作用域卫生（防与别的插件撞名 —— 2026-10-11 事故的回归测试） ===");
+{
+  // DSH 把多个插件的 client.js 放进**同一个脚本作用域**。顶层 const/let/class 会落进
+  // 同一个全局词法作用域，两个插件用同名就是 SyntaxError，整个 client combo 全灭。
+  const topLevel = source
+    .split("\n")
+    .map((line, i) => ({ line, n: i + 1 }))
+    .filter((x) => /^(?:const|let|var|function|class)\s/.test(x.line));
+  ok(
+    "client.js 顶层没有任何 const/let/var/function/class 声明",
+    topLevel.length === 0,
+    topLevel.map((x) => `L${x.n}: ${x.line.trim().slice(0, 60)}`).join(" | "),
+  );
+  ok("整个 bundle 包在 IIFE 里（首）", /\(\(\)\s*=>\s*\{/.test(source));
+  ok("整个 bundle 包在 IIFE 里（尾）", /\}\)\(\);\s*$/.test(source.trim()));
+  ok("顶层不再出现裸标识符 CLIENT_BUNDLE_ID", !/^const CLIENT_BUNDLE_ID/m.test(source));
+}
+
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail === 0 ? 0 : 1);

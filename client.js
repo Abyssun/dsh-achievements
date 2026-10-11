@@ -11,7 +11,15 @@
  *   3. `settings.plugins.tab` —— 昵称/头像的配置页
  *
  * 硬约束（都有事故记录，别改）：
- *   - `CLIENT_BUNDLE_ID` 必须与 `__ModuleLoader__.load` 的 id 完全一致，
+ *   - **整个 bundle 必须包在 IIFE 里**，顶层不能留任何 `const`/`let`/`function`。
+ *     DSH 会把多个插件的 client.js 放进**同一个脚本作用域**（实测合并资源
+ *     `dsh-app://app/plugins/??a/client.js,b/client.js,…`）。顶层 `const` 会落进同一个
+ *     全局词法作用域，两个插件只要用同一个名字就是
+ *     `SyntaxError: Identifier 'X' has already been declared` —— 整个 client combo 全灭，
+ *     界面只报 "web boot: 1 entry did not activate: <某插件>: import failed"。
+ *     ⚠️ 2026-10-11 实际事故：`dsh-token-stats/client.js` 顶层也声明了 `CLIENT_BUNDLE_ID`，
+ *     我们照抄那个写法，双方一起把应用打挂（`scripts/smoke-client.mjs` 现在会守住这条）。
+ *   - bundle id 必须与 `__ModuleLoader__.load` 的 id 完全一致，
  *     它同时是 HMR 的样式归属 id（`data-plugin`）。
  *   - `remote.*` 命名空间必须自挂载：官方 `dsh-api-remotes` 只挂那五个官方命名空间。
  *   - 每个 strict codec **必须带 `create()` 工厂**，否则 `$mount` 抛
@@ -19,10 +27,11 @@
  *   - `apply()` 整体 try/catch **永不 reject**：client bundle reject 会卡住 web 启动。
  */
 
-const CLIENT_BUNDLE_ID = "dsh-achievements";
+(() => {
+  const ACH_CLIENT_BUNDLE_ID = "dsh-achievements";
 
-window.__ModuleLoader__.load({
-  id: CLIENT_BUNDLE_ID,
+  window.__ModuleLoader__.load({
+    id: ACH_CLIENT_BUNDLE_ID,
   factory: (require) => {
     var module = { exports: {} };
     var exports = module.exports;
@@ -568,7 +577,7 @@ window.__ModuleLoader__.load({
       //    并在别人卸载时被连带删掉。
       try {
         const style = document.createElement("style");
-        style.setAttribute("data-plugin", CLIENT_BUNDLE_ID);
+        style.setAttribute("data-plugin", ACH_CLIENT_BUNDLE_ID);
         style.textContent = CSS;
         document.head.appendChild(style);
         ctx.effect(() => () => {
@@ -637,4 +646,5 @@ window.__ModuleLoader__.load({
     exports.inject = ["slots", "remote"];
     return module.exports;
   },
-});
+  });
+})();
