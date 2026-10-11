@@ -1,6 +1,6 @@
 {
   "name": "dsh-achievements",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Personal achievements dashboard for DeepSeek Harness: a full-page profile (cumulative tokens, peak usage, longest task, longest/current streak) plus a Token activity view with a contribution heatmap. Built on the official session-projection seam.",
   "keywords": ["dsh", "deepseek-harness", "plugin", "achievements", "profile", "token", "stats"],
   "type": "module",
@@ -34,7 +34,7 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh": ">=0.1.5-rc.2 <0.3.0",
-    "@deepseek-ai/dsh-typert-protocol": "^0.1.5-rc.2"
+    "@deepseek-ai/dsh-typert-protocol": "^0.1.5-rc.2 || ^0.2.0-rc.1"
   },
   "dependencies": {
     "zod": "^4.4.3"
@@ -45,7 +45,8 @@
     "smoke:host": "node scripts/smoke-host.mjs",
     "smoke:client": "node scripts/smoke-client.mjs",
     "smoke:typert": "node scripts/smoke-typert.mjs",
-    "smoke": "npm run smoke:metrics && npm run smoke:host && npm run smoke:client && npm run smoke:typert",
+    "smoke:compat": "node scripts/smoke-compat.mjs",
+    "smoke": "npm run smoke:compat && npm run smoke:metrics && npm run smoke:host && npm run smoke:client && npm run smoke:typert",
     "e2e": "npm run check && npm run smoke"
   }
 }

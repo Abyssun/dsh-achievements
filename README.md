@@ -22,9 +22,8 @@
 本插件是**标准 DSH bundle**：`package.json` 声明 `dsh.bundle.patch`，包内自带 `cordis.patch.yml`。
 
 ```bash
-# 从 GitHub 安装（把 <owner> 换成你的 GitHub 用户名）
-# 应用内的插件市场/插件管理同样接受 github: 来源——它就是在 profile 目录里跑 pnpm add
-pnpm add "github:<owner>/dsh-achievements"
+# 从 GitHub 安装（应用内的插件市场/插件管理同样接受 github: 来源——它就是在 profile 目录里跑 pnpm add）
+pnpm add "github:Abyssun/dsh-achievements"
 
 # 本地开发：软链到本仓库，改代码后仍**需要重启** DSH
 dsh plugin --profile <profile> add /path/to/dsh-achievements
@@ -32,6 +31,14 @@ dsh plugin --profile <profile> add /path/to/dsh-achievements
 # 卸载
 dsh plugin --profile <profile> remove dsh-achievements
 ```
+
+> ⚠️ **版本兼容门**：DSH 0.2.0 起会在安装时校验 `engines.dsh` 与**全部**
+> `@deepseek-ai/dsh*` peer，不命中就**拒绝安装**（并回滚 package.json / lockfile / node_modules），
+> 提示形如 `Plugin <name>@<ver> is incompatible with dsh <runtime>`。
+> 本插件的声明覆盖 0.1.5-rc.2 ~ 0.2.x：
+> `@deepseek-ai/dsh: ">=0.1.5-rc.2 <0.3.0"`、
+> `@deepseek-ai/dsh-typert-protocol: "^0.1.5-rc.2 || ^0.2.0-rc.1"`。
+> **改支持范围时这两处和 `engines.dsh` 必须同步改**。
 
 > ⚠️ 用 **桌面应用（Electron）** 时，它的 `desktop` profile 由应用独占管理，
 > `dsh plugin` 命令会直接拒绝（`profile "desktop" is managed exclusively by the Electron application`）。
@@ -92,19 +99,39 @@ npm run e2e        # check + smoke
 | `smoke:host` | **真 zod schema 校验 `getMetrics()` 的产出**、继承前缀、缓存、失败降级、`setProfile` 落盘 | 不需要 |
 | `smoke:client` | bundle 注册契约、`apply()` 在坏 seam 下不 reject、槽位 id/key 一致、codec 带 `create` | 不需要 |
 | `smoke:typert` | 用**部署侧真 `validateTypertManifest`** 验 manifest | 需要部署的 `@deepseek-ai` |
+| `smoke:compat` | 把 `engines.dsh` / `@deepseek-ai/dsh*` peer 范围喂给 semver，验证**兼容门**放行 | 需要 `semver` |
 
-后两个脚本要解析部署侧模块，所以本地开发需要把部署的 `@deepseek-ai/*` 与 `zod`
+`smoke` 的默认检查对象是 `0.1.5-rc.2` 与 `0.2.0-rc.2` 两个运行时版本（本机实测：npm 目录里是前者，
+桌面应用真正跑的是后者）。换版本时直接传参或设 `DSH_RUNTIME_VERSION`。
+
+后三个脚本要解析部署侧模块，所以本地开发需要把部署的 `@deepseek-ai/*`、`zod` 与 `semver`
 junction 进 `./node_modules`（已 gitignore）：
 
 ```powershell
 # 在 plugins/dsh-achievements/ 下
-New-Item -ItemType Junction -Path node_modules\@deepseek-ai `
-  -Target "$env:APPDATA\npm\node_modules\@deepseek-ai\dsh\node_modules\@deepseek-ai"
-New-Item -ItemType Junction -Path node_modules\zod `
-  -Target "$env:APPDATA\npm\node_modules\@deepseek-ai\dsh\node_modules\zod"
+$dep = "$env:APPDATA\npm\node_modules\@deepseek-ai\dsh\node_modules"
+New-Item -ItemType Junction -Path node_modules\@deepseek-ai -Target "$dep\@deepseek-ai"
+New-Item -ItemType Junction -Path node_modules\zod           -Target "$dep\zod"
+New-Item -ItemType Junction -Path node_modules\semver        -Target "$dep\semver"
 ```
 
 或设 `DSH_NODE_MODULES` 指向部署的 `node_modules`。
+
+> ⚠️ **两个坑**（都实测踩过）：
+> 1. `%APPDATA%\npm\...\@deepseek-ai\` 那份可能只是 **0.1.5-rc.2**，而桌面应用真正跑的是
+>    **0.2.0-rc.2**。对着旧那份跑冒烟会得出错误结论。
+> 2. 应用的插件管理器安装/回滚时会重写 `node_modules`，那份 junction 目标**可能被清空**，
+>    于是 `smoke:host` / `smoke:typert` 突然报 `ERR_MODULE_NOT_FOUND`。
+>
+> 可靠做法：从 `app.asar` 里解出真实运行时（仓库根的 `tools/asar-read.mjs`）：
+>
+> ```powershell
+> # 在仓库根
+> node tools/asar-read.mjs extract '^dsh/node_modules/' F:\0dsh\dsh-runtime-0.2.0-rc.2 --strip 'dsh/'
+> # 然后把三个 junction 指向 <out>\node_modules\{@deepseek-ai,zod,semver}
+> ```
+>
+> 解出来的是 289 个 `@deepseek-ai` 包、约 347 MB，与 GUI 里跑的版本严格一致。
 
 ### 用真实会话离线重放
 
