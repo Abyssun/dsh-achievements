@@ -1,0 +1,47 @@
+{
+  "name": "dsh-achievements",
+  "version": "0.1.0",
+  "description": "Personal achievements dashboard for DeepSeek Harness: a full-page profile (cumulative tokens, peak usage, longest task, longest/current streak) plus a Token activity view with a contribution heatmap. Built on the official session-projection seam.",
+  "keywords": ["dsh", "deepseek-harness", "plugin", "achievements", "profile", "token", "stats"],
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./typert": "./typert.host.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "typert.host.js",
+    "cordis.patch.yml",
+    "lib"
+  ],
+  "license": "MIT",
+  "engines": {
+    "dsh": ">=0.1.5-rc.2 <0.3.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh": ">=0.1.5-rc.2 <0.3.0",
+    "@deepseek-ai/dsh-typert-protocol": "^0.1.5-rc.2"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "scripts": {
+    "check": "node --check index.js && node --check client.js && node --check typert.host.js",
+    "smoke": "node scripts/smoke-metrics.mjs",
+    "e2e": "npm run check && npm run smoke"
+  }
+}

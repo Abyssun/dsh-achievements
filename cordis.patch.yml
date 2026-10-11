@@ -1,0 +1,8 @@
+# dsh-achievements 的 bundle patch —— 随包分发，被 DSH 启动时应用。
+#
+# 注意：不要再在 profile 的 cordis.patch.yml 里手工插一行，否则同一 id 会重复挂载。
+# 安装：dsh plugin --profile <profile> add <本包路径或包名>（会自动追加到 dsh.profile.bundles）
+# 卸载：dsh plugin --profile <profile> remove dsh-achievements
+- insert:
+    - id: dsh-achievements
+      name: 'dsh-achievements'
