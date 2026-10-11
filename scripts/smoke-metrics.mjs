@@ -72,6 +72,7 @@ const SESSION_HEADER = { type: 'session', version: 0, id: 's1', createdAt: 1, cw
 const CHUNK = { type: 'reasoning-chunks', data: { chunks: [] } };
 
 const T0 = new Date(2026, 0, 10, 9, 0, 0).getTime(); // 2026-01-10 09:00 本地
+const MIN = 60_000;
 const HOUR = 3600_000;
 const DAY = 86400_000;
 
@@ -162,10 +163,11 @@ console.log('=== 5. 峰值 / 最长任务 / 汇总 ===');
   eq('峰值落在第二天', p.day, dayKeyOf(T0 + DAY));
 }
 {
-  // 两个会话：会话 A 跨度 1 小时，会话 B 跨度 1 天 → 最长任务 = 1 天
+  // 会话 A：两个事件间隔 10 分钟（< 30 分钟阈值）→ 一段 10 分钟的作业
+  // 会话 B：两个事件间隔 1 天（> 阈值）→ 各自成段，每段 0 → 不计
   const a = foldEvents([
     { type: 'user/message', seq: 1, time: T0, data: {} },
-    assistantMessage(2, T0 + HOUR, { input: 10, output: 0 }),
+    assistantMessage(2, T0 + 10 * MIN, { input: 10, output: 0 }),
   ]);
   const b = foldEvents([
     { type: 'user/message', seq: 1, time: T0, data: {} },
@@ -173,10 +175,31 @@ console.log('=== 5. 峰值 / 最长任务 / 汇总 ===');
   ]);
   const m = computeMetrics([a, b], T0 + 2 * DAY);
   eq('累计 Token 数', m.cumulativeTokens, 30);
-  eq('最长任务用时 = 1 天', m.longestTaskMs, DAY);
+  eq('最长任务用时取密集会话的作业段 = 10 分', m.longestTaskMs, 10 * MIN);
+  eq('间隔超阈值的会话不计时长（不再给出“跨天”假值）', b.burstLongestMs, 0);
   eq('会话数', m.sessions, 2);
   eq('活跃天数', m.activeDays, 2);
   eq('有消耗的天才算活跃（0 消耗天被排除）', activeDayKeys({ days: { '2026-01-01': { total: 0 }, '2026-01-02': { total: 5 } } }).length, 1);
+}
+{
+  // 空档切分：两段作业取较长的一段
+  const dense = foldEvents([
+    { type: 'user/message', seq: 1, time: T0, data: {} },
+    assistantMessage(2, T0 + 10 * MIN, { input: 10, output: 0 }),
+    assistantMessage(3, T0 + 20 * MIN, { input: 10, output: 0 }),
+    assistantMessage(4, T0 + 3 * HOUR, { input: 10, output: 0 }),          // 空档 2h40m → 新段
+    assistantMessage(5, T0 + 3 * HOUR + 15 * MIN, { input: 10, output: 0 }),
+  ]);
+  eq('最长作业段 = 两段中较长的 20 分', dense.burstLongestMs, 20 * MIN);
+  eq('段内事件间隔按阈值切分', dense.burstStart, T0 + 3 * HOUR);
+  const sparse = foldEvents([
+    { type: 'user/message', seq: 1, time: T0, data: {} },
+    assistantMessage(2, T0 + HOUR, { input: 5, output: 0 }),
+  ]);
+  eq('两事件间隔 1 小时（> 阈值）→ 0', sparse.burstLongestMs, 0);
+  const m2 = computeMetrics([dense, sparse], T0 + 4 * HOUR);
+  eq('跨会话取最长任务用时', m2.longestTaskMs, 20 * MIN);
+  eq('作业段不影响 token 累计', m2.cumulativeTokens, 45);
 }
 {
   const led = foldEvents([
@@ -191,7 +214,30 @@ console.log('=== 5. 峰值 / 最长任务 / 汇总 ===');
   eq('无会话 → 最长任务 0', e.longestTaskMs, 0);
 }
 
-console.log('=== 6. 格式化 ===');
+console.log('=== 6. 继承前缀（fork 子会话的父会话副本）必须整段跳过 ===');
+{
+  const evs = [
+    assistantMessage(1, T0, { input: 1000, output: 0 }), // 继承来的
+    assistantMessage(2, T0 + MIN, { input: 500, output: 0 }), // 继承来的
+    assistantMessage(3, T0 + 2 * MIN, { input: 7, output: 3 }), // 本会话自己的
+  ];
+  const all = foldEvents(evs);
+  eq('不跳前缀 → 全部计入（会与父会话重复）', all.totals.total, 1510);
+  eq('不跳前缀 → messages 也全算', all.messages, 3);
+
+  const seeded = foldEvents(evs, emptyLedger(2));
+  eq('inheritedEventCount=2 → 只算自己的用量', seeded.totals.total, 10);
+  eq('inheritedEventCount=2 → 只算自己的消息数', seeded.messages, 1);
+  eq('seen 精确停在前缀长度', seeded.seen, 2);
+  eq('前缀不影响作业段（时间边界从自己的事件起算）', seeded.first, T0 + 2 * MIN);
+
+  const zero = foldEvents(evs, emptyLedger(0));
+  eq('inheritedEventCount=0 等价于不跳', zero.totals.total, 1510);
+  const over = foldEvents(evs, emptyLedger(99));
+  eq('inherited 超过事件数 → 全部跳过，不报错', over.totals.total, 0);
+}
+
+console.log('=== 7. 格式化 ===');
 {
   eq('19.5亿', formatTokens(1_950_000_000), '19.5亿');
   eq('1.1亿', formatTokens(110_000_000), '1.1亿');
