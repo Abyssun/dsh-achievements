@@ -1,0 +1,191 @@
+/**
+ * Client 半冒烟：把 `client.js` 当成加载器会加载的**经典脚本**跑一遍。
+ *
+ * 检查的是那些「语法合法但运行时契约错」的问题 —— `npm run check` 抓不住：
+ *   1. bundle 是否通过 `window.__ModuleLoader__.load({id, factory})` 注册，且 id === 包名；
+ *      （加载了却没注册 → 宿主抛 "loaded without registering ... via __ModuleLoader__.load"）
+ *   2. factory 只靠 `require("react")` 能不能返回 exports
+ *   3. `apply(ctx)` 在**正常与恶劣 seam 下都不得 reject**
+ *      （client bundle reject 会把整个 web 启动卡住）
+ *   4. 三个槽位是否按契约注册：`main` 的 key === `sidebar.panellist` 的 id
+ *   5. CLIENT_REMOTE 的**每个 strict codec 都带 create() 工厂**
+ *      （缺了 `$mount` 抛 "has no create() factory" → 命名空间挂不上 → 整页空白）
+ *
+ * 全部离线，不需要 DSH、不读用户数据。
+ */
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import vm from "node:vm";
+
+const pkgRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const PKG_NAME = "dsh-achievements";
+const source = readFileSync(join(pkgRoot, "client.js"), "utf8");
+
+let pass = 0;
+let fail = 0;
+function ok(name, cond, extra) {
+  if (cond) {
+    pass += 1;
+    console.log(`  ✓ ${name}`);
+  } else {
+    fail += 1;
+    console.log(`  ✗ ${name}${extra === undefined ? "" : `  → ${extra}`}`);
+  }
+}
+
+/** 极简 React 替身：apply 阶段只用到 createElement，钩子不会被调用（不渲染）。 */
+const fakeReact = {
+  createElement: (type, props, ...children) => ({ type, props, children }),
+  Fragment: Symbol("Fragment"),
+  useState: (v) => [v, () => {}],
+  useEffect: () => {},
+  useRef: (v) => ({ current: v }),
+  useCallback: (fn) => fn,
+  useMemo: (fn) => fn(),
+};
+
+/**
+ * 把 bundle 当经典脚本执行，拿到它注册的 {id, factory}。
+ * @param {{withDocument?: boolean}} opts
+ */
+function loadBundle(opts = {}) {
+  const captured = [];
+  const sandbox = {
+    window: {
+      __ModuleLoader__: {
+        load: (entry) => captured.push(entry),
+      },
+    },
+  };
+  if (opts.withDocument !== false) {
+    const styles = [];
+    sandbox.document = {
+      head: { appendChild: (el) => styles.push(el) },
+      createElement: () => ({ setAttribute() {}, remove() {}, textContent: "" }),
+    };
+  }
+  sandbox.console = { warn: () => {}, error: () => {}, log: () => {} };
+  vm.createContext(sandbox);
+  new vm.Script(source, { filename: "client.js" }).runInContext(sandbox);
+  return { captured, sandbox };
+}
+
+/** 造一个记录型 ctx。 */
+function makeCtx(opts = {}) {
+  const registrations = [];
+  const effects = [];
+  let mounted = null;
+  const ctx = {
+    remote: {
+      $mount: async (descriptor) => {
+        if (opts.mountThrows) throw new Error("$mount boom");
+        mounted = descriptor;
+      },
+    },
+    get: (name) => {
+      if (opts.noRemote && name.startsWith("remote.")) return undefined;
+      if (name === "remote.achievements") {
+        return { getMetrics: async () => ({ ok: true, value: null }), setProfile: async () => ({ ok: true, value: {} }) };
+      }
+      return undefined;
+    },
+    slots: {
+      inject: (name, fn) => {
+        if (opts.injectThrows) throw new Error("inject boom");
+        return fn();
+      },
+      register: (options, component) => {
+        registrations.push({ options, component });
+        return () => {};
+      },
+    },
+    effect: (fn) => {
+      if (opts.effectThrows) throw new Error("effect boom");
+      effects.push(fn);
+      return () => {};
+    },
+  };
+  return { ctx, registrations, effects, getMounted: () => mounted };
+}
+
+console.log("=== 1. bundle 注册契约 ===");
+{
+  const { captured } = loadBundle();
+  ok("通过 __ModuleLoader__.load 注册了一次", captured.length === 1, `captured=${captured.length}`);
+  const entry = captured[0] || {};
+  ok(`load 的 id === 包名（${PKG_NAME}）`, entry.id === PKG_NAME, String(entry.id));
+  ok("factory 是函数", typeof entry.factory === "function");
+
+  const exports = entry.factory((name) => {
+    if (name === "react") return fakeReact;
+    throw new Error(`bundle 索取了非白名单模块: ${name}`);
+  });
+  ok("只靠 react 就能拿到 exports", !!exports);
+  ok("exports.apply 是函数", typeof exports.apply === "function");
+  ok('exports.inject 含 "slots" 与 "remote"', Array.isArray(exports.inject) && exports.inject.includes("slots") && exports.inject.includes("remote"), JSON.stringify(exports.inject));
+}
+
+console.log("=== 2. apply() 在正常 seam 下 ===");
+{
+  const { captured } = loadBundle();
+  const exports = captured[0].factory(() => fakeReact);
+  const { ctx, registrations, effects, getMounted } = makeCtx();
+  let rejected = null;
+  await exports.apply(ctx).catch((e) => {
+    rejected = e;
+  });
+  ok("apply() 未 reject", rejected === null, rejected && rejected.message);
+
+  const mounted = getMounted();
+  ok("$mount 收到了描述符", !!mounted);
+  ok("描述符 package 正确", mounted?.package === PKG_NAME, String(mounted?.package));
+
+  const codecs = [];
+  for (const d of mounted?.descriptors || []) {
+    for (const p of d.parameters || []) codecs.push({ owner: d.id, codec: p.codec });
+    codecs.push({ owner: d.id, codec: d.result });
+  }
+  ok("描述符 codec 数量 > 0", codecs.length > 0, String(codecs.length));
+  const noCreate = codecs.filter((c) => c.codec.mode === "strict" && typeof c.codec.create !== "function");
+  ok("每个 strict codec 都带 create() 工厂", noCreate.length === 0, noCreate.map((c) => c.owner).join(", "));
+  const badSymbol = codecs.filter((c) => typeof c.codec.typeSymbol !== "string" || c.codec.typeSymbol === "");
+  ok("每个 codec 都有非空 typeSymbol", badSymbol.length === 0);
+  const ids = (mounted?.descriptors || []).map((d) => d.id);
+  ok("描述符 id 以包名为前缀", ids.every((id) => id.startsWith(`${PKG_NAME}#`)), ids.join(", "));
+
+  const main = registrations.find((r) => r.options.name === "main");
+  const rail = registrations.find((r) => r.options.name === "sidebar.panellist");
+  const tab = registrations.find((r) => r.options.name === "settings.plugins.tab");
+  ok("注册了 main 槽位", !!main);
+  ok("注册了 sidebar.panellist 槽位", !!rail);
+  ok("注册了 settings.plugins.tab 槽位", !!tab);
+  ok("main 用了 key（keyed 槽位）", typeof main?.options.key === "string" && main.options.key !== "", JSON.stringify(main?.options));
+  ok("panellist 用了 id（list 槽位）", typeof rail?.options.id === "string" && rail.options.id !== "", JSON.stringify(rail?.options));
+  ok("★ sidebar.panellist 的 id === main 的 key（否则图标点不到页面）", rail?.options.id === main?.options.key, `id=${rail?.options.id} key=${main?.options.key}`);
+  ok("panellist 的 label 是函数", typeof rail?.options.label === "function");
+  ok("label() 返回非空字符串", typeof rail?.options.label?.() === "string" && rail.options.label().length > 0);
+  ok("三个槽位都传了可渲染组件", [main, rail, tab].every((r) => typeof r?.component === "function"));
+  ok("注册了样式清理 effect（data-plugin 预打标）", effects.length > 0, String(effects.length));
+}
+
+console.log("=== 3. apply() 在恶劣 seam 下必须仍然不 reject ===");
+for (const scenario of [
+  { key: "mountThrows", label: "$mount 抛错" },
+  { key: "injectThrows", label: "slots.inject 抛错" },
+  { key: "effectThrows", label: "ctx.effect 抛错" },
+  { key: "withDocument", label: "没有 document（非浏览器环境）" },
+]) {
+  const opts = scenario.key === "withDocument" ? { withDocument: false } : { [scenario.key]: true };
+  const { captured } = loadBundle(opts);
+  const exports = captured[0].factory(() => fakeReact);
+  const { ctx } = makeCtx(opts);
+  let rejected = null;
+  await exports.apply(ctx).catch((e) => {
+    rejected = e;
+  });
+  ok(`${scenario.label} → apply() 仍不 reject`, rejected === null, rejected && rejected.message);
+}
+
+console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
+process.exit(fail === 0 ? 0 : 1);
