@@ -1,8 +1,16 @@
 {
   "name": "dsh-achievements",
   "version": "0.1.2",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Abyssun/dsh-achievements.git"
+  },
+  "homepage": "https://github.com/Abyssun/dsh-achievements#readme",
+  "bugs": {
+    "url": "https://github.com/Abyssun/dsh-achievements/issues"
+  },
   "description": "Personal achievements dashboard for DeepSeek Harness: a full-page profile (cumulative tokens, peak usage, longest task, longest/current streak) plus a Token activity view with a contribution heatmap. Built on the official session-projection seam.",
-  "keywords": ["dsh", "deepseek-harness", "plugin", "achievements", "profile", "token", "stats"],
+  "keywords": ["dsh", "deepseek-harness", "dsh-plugin", "dsh-plugins", "cordis", "token-usage", "token-stats", "dashboard", "profile", "heatmap", "achievements"],
   "type": "module",
   "main": "index.js",
   "exports": {

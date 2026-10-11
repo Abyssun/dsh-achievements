@@ -1,0 +1,174 @@
+# 发版工作流：打 v* 标签 → 校验 → 打包 → 建 GitHub Release（可选：发 npm）
+#
+# 设计取舍都是踩过的坑，别"顺手优化"掉：
+#  1. **不开 `cache: npm`**：本仓库没有 lockfile，setup-node 开 cache 会直接失败。
+#  2. **pack 作业不装任何依赖**：本包的 peerDependencies 与 npm 的自动 peer 解析会打架
+#     （ERESOLVE）—— 参考实现在 v1.5.0 因此翻过车。`npm pack` 本来就不需要依赖。
+#  3. **产物名从 package.json 的版本算**，不要用 `${GITHUB_REF_NAME#v}` 拼：
+#     npm pack 的产物名用 semver（不带 v），而 ref_name 带 v；拼错会让 Release 里的
+#     安装链接 404（参考实现的 release 正文就这么错过）。
+#  4. npm 发布走 **OIDC Trusted Publishing**（`id-token: write`，无需静态 token）。
+#     注意**故意不写 `registry-url`**：setup-node 会往 .npmrc 塞 `${NODE_AUTH_TOKEN}` 占位，
+#     而 OIDC 场景下这个变量是空的，npm 会报 "Failed to replace env in config"。
+#     默认 registry 就是 npmjs.org，不需要额外指定。
+#  5. verify 作业只装 semver，并且加 `--legacy-peer-deps`：否则 npm 会去自动安装
+#     `@deepseek-ai/*` peer（一堆用不上的包，还可能版本冲突）。
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # 手动触发：只跑校验 + 打包出 artifact，不发 Release（用来试跑）
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: 校验（语法 + 离线冒烟）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          # 故意不开 cache：仓库没有 lockfile
+
+      - name: 安装冒烟脚本需要的 semver
+        run: npm install --no-save --no-audit --no-fund --legacy-peer-deps semver@^7
+
+      - name: 语法检查（5 个文件）
+        run: npm run check
+
+      - name: 纯逻辑冒烟（计费口径 / 连续天数 / 格式化）
+        run: node scripts/smoke-metrics.mjs
+
+      - name: client bundle 冒烟（含顶层作用域卫生 —— 防止和别的插件撞名）
+        run: node scripts/smoke-client.mjs
+
+      - name: 兼容门范围自检（engines.dsh + @deepseek-ai/dsh* peer）
+        run: node scripts/smoke-compat.mjs
+
+  pack:
+    name: 打包
+    needs: [verify]
+    runs-on: ubuntu-latest
+    outputs:
+      tarball: ${{ steps.pack.outputs.tarball }}
+      version: ${{ steps.pack.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: npm pack（不装依赖）
+        id: pack
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          tarball="$(npm pack --silent)"
+          {
+            echo "version=$version"
+            echo "tarball=$tarball"
+          } >> "$GITHUB_OUTPUT"
+          echo "打包产物：$tarball（版本 $version）"
+          echo "--- 产物内容 ---"
+          tar -tzf "$tarball"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball
+          path: '*.tgz'
+          if-no-files-found: error
+
+  release:
+    name: 建 GitHub Release
+    needs: [pack]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: tarball
+
+      - name: 生成 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: '*.tgz'
+          generate_release_notes: true
+          body: |
+            `dsh-achievements` v${{ needs.pack.outputs.version }} —— DeepSeek Harness 个人成就插件。
+
+            ## 安装（推荐：跟随 main）
+
+            在应用内的插件市场 / 插件管理里，来源填：
+
+            ```
+            github:Abyssun/dsh-achievements
+            ```
+
+            想钉死版本就用 commit：
+
+            ```
+            github:Abyssun/dsh-achievements#${{ github.sha }}
+            ```
+
+            ## 安装（本 Release 的产物）
+
+            ```bash
+            dsh plugin --profile <profile> add \
+              https://github.com/Abyssun/dsh-achievements/releases/download/${{ github.ref_name }}/${{ needs.pack.outputs.tarball }}
+            ```
+
+            或在 profile 目录里：
+
+            ```bash
+            pnpm add https://github.com/Abyssun/dsh-achievements/releases/download/${{ github.ref_name }}/${{ needs.pack.outputs.tarball }}
+            ```
+
+            > 装完**必须重启 DSH**：已装插件没有热重载。
+
+  publish-npm:
+    name: 发布到 npm（OIDC，默认关闭）
+    needs: [pack]
+    # 需要在 npmjs.com 为这个包配好 Trusted Publisher（repo + workflow 路径），
+    # 并把仓库变量 PUBLISH_NPM 设为 true 才会跑。没配之前保持关闭，避免每次发版都红。
+    if: startsWith(github.ref, 'refs/tags/v') && vars.PUBLISH_NPM == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC：Trusted Publishing 与 provenance 都需要
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: tarball
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24' # OIDC 发布需要 npm >= 11.5.1，Node 24 自带
+          # 故意不写 registry-url，见文件顶部第 4 条
+
+      - name: 确认 npm 版本满足 OIDC 要求
+        run: |
+          set -euo pipefail
+          node -v
+          npm -v
+          node -e "
+            const v = require('child_process').execSync('npm -v').toString().trim().split('.').map(Number);
+            if (v[0] < 11 || (v[0] === 11 && v[1] < 5)) {
+              console.error('npm 版本过低：OIDC Trusted Publishing 需要 >= 11.5.1');
+              process.exit(1);
+            }
+            console.log('npm 版本满足 OIDC 要求');
+          "
+
+      - name: npm publish（Trusted Publishing + provenance）
+        run: npm publish ./*.tgz --provenance --access public
