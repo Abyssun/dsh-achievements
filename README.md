@@ -127,11 +127,13 @@ New-Item -ItemType Junction -Path node_modules\semver        -Target "$dep\semve
 >
 > ```powershell
 > # 在仓库根
-> node tools/asar-read.mjs extract '^dsh/node_modules/' F:\0dsh\dsh-runtime-0.2.0-rc.2 --strip 'dsh/'
-> # 然后把三个 junction 指向 <out>\node_modules\{@deepseek-ai,zod,semver}
+> node tools/asar-read.mjs extract '^dsh/node_modules/@deepseek-ai/' F:\0dsh\dsh-runtime-@deepseek-ai --strip 'dsh/node_modules/'
+> node tools/asar-read.mjs extract '^dsh/node_modules/zod/' <同一个输出目录> --strip 'dsh/node_modules/'
+> # 然后把 node_modules\{@deepseek-ai,zod,semver} 三个 junction 指向 <输出目录>\{@deepseek-ai,zod,semver}
 > ```
 >
-> 解出来的是 289 个 `@deepseek-ai` 包、约 347 MB，与 GUI 里跑的版本严格一致。
+> 解出来的是 289 个 `@deepseek-ai` 包（0.2.0-rc.2），与 GUI 里跑的版本严格一致。
+> 现成的一份在 `F:\0dsh\dsh-0.2.0-rc.2-@deepseek-ai-repair-kit\`。
 
 ### 用真实会话离线重放
 
@@ -159,6 +161,38 @@ settings.plugins.tab                     资料编辑器
 三处名字必须逐字一致：`index.js` 的类名/服务键、`typert.host.js` 的
 `model.services[].key`/`exportName`、`client.js` 的 `CLIENT_REMOTE` 描述符 id。
 `npm run smoke:typert` + `smoke:client` 会守住这一点。
+
+## 发版
+
+推 `v*` 标签即自动发版（`.github/workflows/release.yml`）：
+
+```bash
+# 1) 改 package.json 的 version → 提交 → 推 main
+git push https://github.com/Abyssun/dsh-achievements.git main
+
+# 2) 打标签并推送 —— 这一步触发 workflow
+git tag -a v0.1.3 -m "dsh-achievements v0.1.3"
+git push https://github.com/Abyssun/dsh-achievements.git v0.1.3
+```
+
+workflow 做三件事：**校验**（`node --check` + 三项离线冒烟：计费口径 / client 顶层作用域卫生 /
+兼容门范围）→ **`npm pack`** → **建 GitHub Release**（正文给出 `github:` spec 与 Release
+产物两种安装方式）。
+
+| 想做的事 | 怎么做 |
+|---|---|
+| 先试跑、不发 Release | Actions 页手动 **Run workflow**（只校验 + 上传 artifact） |
+| 同时发到 npm | 在 npmjs.com 给这个包配好 **Trusted Publisher**（repo + workflow 路径），再把仓库**变量** `PUBLISH_NPM` 设为 `true`；`publish-npm` 作业走 OIDC，不需要静态 token |
+| 本地验证发版产物 | `npm pack --silent` → 产物名是 `dsh-achievements-<version>.tgz`（semver，**不带 v**）；`tar -tzf` 看内容 |
+
+> ⚠️ workflow 里有**三个别"顺手优化"掉**的点，理由都写在文件注释里：
+> ① 不能开 `cache: npm`（仓库没有 lockfile，setup-node 会直接失败）；
+> ② `pack` 作业不能装依赖（peer 与自动 peer 解析会 ERESOLVE）；
+> ③ `publish` 作业不能写 `registry-url`（setup-node 会塞 `${NODE_AUTH_TOKEN}` 占位，
+> OIDC 场景下该变量为空会报错）。
+>
+> 另外产物名要用 `package.json` 的版本算，**不要**用 `${GITHUB_REF_NAME#v}` 拼 ——
+> `npm pack` 的产物名不带 v，而 tag 名带 v，拼错就是 Release 里安装链接 404。
 
 ## License
 
