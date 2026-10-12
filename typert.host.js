@@ -105,6 +105,8 @@ const metaSchema = z
     cold: z.number(),
     live: z.number(),
     failed: z.number(),
+    /** 走原始日志兜底成功的会话数 */
+    raw: z.number(),
     timedOut: z.number(),
     snapshotMs: z.number(),
     backfillMs: z.number(),

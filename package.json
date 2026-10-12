@@ -49,13 +49,14 @@
     "zod": "^4.4.3"
   },
   "scripts": {
-    "check": "node --check index.js && node --check client.js && node --check typert.host.js && node --check lib/fold.js && node --check lib/metrics.js",
+    "check": "node --check index.js && node --check client.js && node --check typert.host.js && node --check lib/fold.js && node --check lib/metrics.js && node --check lib/raw-log.js",
     "smoke:metrics": "node scripts/smoke-metrics.mjs",
+    "smoke:raw-log": "node scripts/smoke-raw-log.mjs",
     "smoke:host": "node scripts/smoke-host.mjs",
     "smoke:client": "node scripts/smoke-client.mjs",
     "smoke:typert": "node scripts/smoke-typert.mjs",
     "smoke:compat": "node scripts/smoke-compat.mjs",
-    "smoke": "npm run smoke:compat && npm run smoke:metrics && npm run smoke:host && npm run smoke:client && npm run smoke:typert",
+    "smoke": "npm run smoke:compat && npm run smoke:metrics && npm run smoke:raw-log && npm run smoke:host && npm run smoke:client && npm run smoke:typert",
     "e2e": "npm run check && npm run smoke"
   }
 }

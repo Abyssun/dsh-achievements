@@ -22,10 +22,11 @@
  * ⚠️ `index.js` 在**模块加载期**读 `process.env.DSH_HOME` 与 `DSH_ACH_READ_TIMEOUT_MS`，
  *    所以必须在 import 之前设好。
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { zstdCompressSync } from "node:zlib";
 
 const pkgRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -63,6 +64,11 @@ function am(seq, time, input, modelKey = PRO) {
       usage: { inputTokens: input, outputTokens: 0 },
     },
   };
+}
+
+/** 把若干条记录写成真实的多帧 zstd 日志缓冲（每行一个 frame）。 */
+function encodeLog(records) {
+  return Buffer.concat(records.map((r) => zstdCompressSync(Buffer.from(JSON.stringify(r) + "\n", "utf8"))));
 }
 
 const dshHome = mkdtempSync(join(tmpdir(), "dsh-ach-"));
@@ -105,11 +111,19 @@ function makeCtx(opts = {}) {
           listSessions: async () => {
             state.listSessionsCalls += 1;
             if (opts.listSessionsThrows) throw new Error("listSessions boom");
-            return Object.keys(opts.snapshots || {}).map((id) => ({ header: { id }, live: false, persisted: true }));
+            return Object.keys(opts.snapshots || {}).map((id) => ({
+              header: { id, cwd: opts.cwdOf ? opts.cwdOf(id) : undefined },
+              live: false,
+              persisted: true,
+            }));
           },
           readSession: async (id) => {
             state.readSessionCalls.push(id);
             if (opts.readSessionNever) return new Promise(() => {});
+            // 按 id 精确模拟「DSH reader 拒绝这个会话」（descriptor 版本不受支持等）
+            if (opts.readSessionThrowsFor === id) {
+              throw new Error(opts.readSessionThrowsForMessage || "readSession boom");
+            }
             if (opts.readSessionThrows) throw new Error("readSession boom");
             return opts.snapshots[id];
           },
@@ -499,6 +513,52 @@ console.log("=== 10. setProfile：昵称 / 头像（含文件上传的 data URL�
 
   const clearedRes = await s.getMetrics("");
   ok("清空后 identity 为 null（客户端会回退账号头像/昵称）", clearedRes.identity.avatar === null && clearedRes.identity.nickname === null);
+}
+
+console.log("=== 11. readSession 被拒时，用原始日志兜底 ===");
+{
+  const id = "1117a871-ddd9-48c2-891f-d59176db54a5";
+  const cwd = "F:\\0dsh\\edu-pentest";
+  const dir = join(dshHome, "sessions", "--F-0dsh-edu-pentest--", id);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "session.jsonl.zstd"),
+    encodeLog([
+      am(1, T0, 5000),
+      { type: "session/end-seed", seq: 2, time: T0, data: { inherited: true } },
+      am(3, T0 + MIN, 700),
+    ]),
+  );
+
+  const { s } = svc({
+    snapshots: { [id]: { session: { id }, inheritedEventCount: 0, events: [] } },
+    cwdOf: (x) => (x === id ? cwd : undefined),
+    readSessionThrowsFor: id,
+    readSessionThrowsForMessage:
+      'failed to read stored session "' + id + '": subagent/descriptor 0 uses unsupported descriptor version 2',
+  });
+  await settle(s);
+  const res = await s.getMetrics("");
+
+  ok("★ 兜底成功：只算自己的 700（继承前缀 5000 已跳）", res.cards.cumulativeTokens === 700, String(res.cards.cumulativeTokens));
+  ok("★ 不再计入 failed", res.progress.failed === 0, JSON.stringify(res.progress));
+  ok("meta.raw = 1", res.meta.raw === 1, JSON.stringify(res.meta));
+  ok("说明里写清了「已用原始日志兜底」", typeof res.error === "string" && res.error.includes("原始日志兜底"), String(res.error));
+  ok("说明里保留了底层原因（供诊断）", typeof res.error === "string" && res.error.includes("unsupported descriptor version"), String(res.error));
+  ok("说明足够短（不再是整条报错糊上去）", typeof res.error === "string" && res.error.length < 400, String(res.error && res.error.length));
+  ok(
+    "仍通过 strict schema",
+    (() => {
+      try {
+        metricsResultSchema.parse(res);
+        return true;
+      } catch {
+        return false;
+      }
+    })(),
+  );
+
+  rmSync(join(dshHome, "sessions"), { recursive: true, force: true });
 }
 
 rmSync(dshHome, { recursive: true, force: true });

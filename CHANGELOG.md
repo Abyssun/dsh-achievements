@@ -28,6 +28,12 @@
   改为用 `ctx.inject(["sessionQuery"], …)` 等依赖到位再启动回填
   （投影注册表一直好用，正因为它走的就是 inject），并加 5s 兜底避免界面永远显示「扫描中」；
   诊断新增 `query=` 字段如实上报。
+- **部分历史会话读不到（导致总计偏低）**。少数会话的 descriptor 版本不被 DSH reader 接受
+  （例如 `subagent/descriptor 0 uses unsupported descriptor version 2`），
+  `readSession()` 直接拒绝它们。实测这些日志的**事件形状是兼容的**，
+  所以新增了**原始日志兜底**：自己解多帧 zstd（用 Node 内置 `zlib`，无额外依赖）、
+  按 `seq` 只取真事件、按官方规则跳过继承前缀，再交给同一套折叠逻辑。
+  诊断新增 `raw=` 报告兜底成功的会话数，说明里写清原因与影响面。
 - 个人主页头像/昵称/按钮**居中**（补回漏掉的容器）。
 - **不再显示本机匿名 UUID**。之前把 `~/.dsh/.anonymous-user-id`（一个 UUID）
   当用户 ID 摆在主页上，容易被误认成账号 ID；现在只有拿到账号 `id`/`contact`

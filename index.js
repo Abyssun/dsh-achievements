@@ -39,6 +39,7 @@ import { dirname, join } from "node:path";
 import { z } from "zod";
 import { applyLedger, emptyLedger, foldEvents, LEDGER_FIELD_VERSION, TASK_GAP_MS } from "./lib/fold.js";
 import { computeMetrics } from "./lib/metrics.js";
+import { findSessionLogFile, readSessionLog } from "./lib/raw-log.js";
 
 /** 服务的 Remote 命名空间 / Typert service key。必须与 typert.host.js、client.js 三处一致。 */
 const SERVICE_KEY = "achievements";
@@ -119,6 +120,12 @@ function msg(e) {
 
 function num(v) {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+/** 截断长文本（用于把底层报错放进一行可读的说明里）。 */
+function truncate(text, max) {
+  const s = String(text ?? "");
+  return s.length <= max ? s : s.slice(0, max) + "…";
 }
 
 /** 给 promise 套超时；超时以 reject 暴露，便于记账。 */
@@ -276,6 +283,10 @@ export class AchievementsService extends TypertRemoteService {
       doneCount: 0,
       failed: 0,
       timedOut: 0,
+      /** 走原始日志兜底成功的会话数 */
+      raw: 0,
+      /** 首个失败原因（原样保留，供诊断；展示时截断） */
+      firstFailure: null,
       error: null,
     };
     this._backfillPromise = null;
@@ -489,7 +500,7 @@ export class AchievementsService extends TypertRemoteService {
       const id = rec && rec.header && rec.header.id;
       if (typeof id !== "string" || id === "") continue;
       if (this._cold.has(id)) continue;
-      pending.push(id);
+      pending.push({ id, cwd: rec.header.cwd });
     }
 
     this._backfill.total += pending.length;
@@ -499,16 +510,26 @@ export class AchievementsService extends TypertRemoteService {
     const worker = async () => {
       while (cursor < pending.length) {
         if (this._disposed) return;
-        const id = pending[cursor++];
+        const item = pending[cursor++];
         try {
-          const snap = await withTimeout(query.readSession(id), READ_TIMEOUT_MS, `readSession(${id})`);
+          const snap = await withTimeout(query.readSession(item.id), READ_TIMEOUT_MS, `readSession(${item.id})`);
           const events = (snap && snap.events) || [];
           const ledger = foldEvents(events, emptyLedger(num(snap && snap.inheritedEventCount)));
-          this._cold.set(id, ledger);
+          this._cold.set(item.id, ledger);
         } catch (e) {
-          this._backfill.failed += 1;
-          if (msg(e).includes("超时")) this._backfill.timedOut += 1;
-          if (!this._backfill.error) this._backfill.error = `readSession(${id}) 失败: ` + msg(e);
+          const reason = msg(e);
+          if (reason.includes("超时")) this._backfill.timedOut += 1;
+          // 回退：DSH 的 readSession 会因为 descriptor/格式版本拒绝部分历史日志，
+          // 但日志正文本就是兼容的 —— 自己解多帧 zstd 读一遍（lib/raw-log.js）。
+          const viaRaw = this._readViaRawLog(item.id, item.cwd);
+          if (viaRaw) {
+            this._cold.set(item.id, viaRaw);
+            this._backfill.raw += 1;
+            if (!this._backfill.firstFailure) this._backfill.firstFailure = reason;
+          } else {
+            this._backfill.failed += 1;
+            if (!this._backfill.firstFailure) this._backfill.firstFailure = reason;
+          }
         }
         this._backfill.doneCount += 1;
       }
@@ -516,6 +537,43 @@ export class AchievementsService extends TypertRemoteService {
 
     const workers = Math.max(1, Math.min(BACKFILL_CONCURRENCY, pending.length));
     await Promise.all(Array.from({ length: workers }, worker));
+  }
+
+  /**
+   * 兜底：直接读原始日志并折叠。任何失败都返回 null（不抛）。
+   * 为什么要这条路径，见 lib/raw-log.js 顶部说明。
+   */
+  _readViaRawLog(sessionId, cwd) {
+    try {
+      const file = findSessionLogFile(join(DSH_HOME, "sessions"), sessionId, cwd);
+      if (!file) return null;
+      const { events, inheritedEventCount } = readSessionLog(file);
+      if (events.length === 0) return null;
+      return foldEvents(events, emptyLedger(inheritedEventCount));
+    } catch (e) {
+      if (!this._backfill.firstFailure) this._backfill.firstFailure = "原始日志兜底失败: " + msg(e);
+      return null;
+    }
+  }
+
+  /** 汇总给用户看的说明：短、可读、说清影响面（不要把整条底层报错糊上去）。 */
+  _composeError() {
+    const parts = [];
+    if (this._backfill.error) parts.push(this._backfill.error);
+    const head = this._backfill.firstFailure ? truncate(this._backfill.firstFailure, 140) : "";
+    if (this._backfill.failed > 0) {
+      parts.push(this._backfill.failed + " 个会话读取失败" + (head ? "（首个原因：" + head + "）" : ""));
+    }
+    if (this._backfill.raw > 0) {
+      // 兜底成功了也要说清原因：这解释了「为什么有些会话走了另一条路」
+      parts.push(
+        this._backfill.raw +
+          " 个会话的日志版本不被 DSH reader 接受" +
+          (head ? "（" + head + "）" : "") +
+          "，已改用原始日志兜底读取",
+      );
+    }
+    return parts.length > 0 ? parts.join("；") : null;
   }
 
   /** 取活会话账本（带 5s 缓存）。失败返回 null，由调用方回退。 */
@@ -594,7 +652,7 @@ export class AchievementsService extends TypertRemoteService {
         total: num(this._backfill.total),
         failed: num(this._backfill.failed),
       },
-      error: this._backfill.error || this._error,
+      error: this._composeError() || this._error,
       generatedAt: Date.now(),
       identity: {
         anonymousUserId: readAnonymousUserId(),
@@ -653,6 +711,8 @@ export class AchievementsService extends TypertRemoteService {
         live: num(live),
         failed: num(this._backfill.failed),
         timedOut: num(this._backfill.timedOut),
+        /** 走原始日志兜底成功的会话数 */
+        raw: num(this._backfill.raw),
         snapshotMs: num(this._lastMs),
         backfillMs: num((this._backfill.finishedAt || Date.now()) - (this._backfill.startedAt || Date.now())),
       },

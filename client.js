@@ -918,7 +918,7 @@
                     { className: "ach-diag" },
                     "diagnostics: registry=" + String(meta.registryAvailable) + " query=" + String(meta.queryAvailable) + " listing=" + String(meta.listing ?? "?") +
                       " cold=" + String(meta.cold ?? "?") + " live=" + String(meta.live ?? "?") +
-                      " failed=" + String(meta.failed ?? "?") + " timedOut=" + String(meta.timedOut ?? "?") +
+                      " failed=" + String(meta.failed ?? "?") + " raw=" + String(meta.raw ?? "?") + " timedOut=" + String(meta.timedOut ?? "?") +
                       " snapshotMs=" + String(meta.snapshotMs ?? "?"),
                   ),
                 )
