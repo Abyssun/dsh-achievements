@@ -505,7 +505,11 @@
       function heatmapGrid(byDate, options) {
         const opts = options || {};
         const weeks = opts.weeks || 53;
-        const today = opts.today instanceof Date ? opts.today : new Date();
+        // ⚠️ 刻意用**鸭子类型**而不是 `instanceof Date`：冒烟测试在 vm 沙箱里跑 bundle，
+        //    传进来的 Date 属于宿主 realm，沙箱内的 `instanceof Date` 会是 false，
+        //    于是悄悄退回 `new Date()`（真实当前时间）—— 本地因时区巧合蒙对，
+        //    CI（UTC）直接失败。这里只要求它长得像 Date。
+        const today = opts.today && typeof opts.today.getFullYear === "function" ? opts.today : new Date();
         const pitch = HEAT_CELL + HEAT_GAP;
         const padLeft = 16; // 留给星期标签
         const padTop = 13; // 留给月份标签
