@@ -128,6 +128,22 @@ function truncate(text, max) {
   return s.length <= max ? s : s.slice(0, max) + "…";
 }
 
+/**
+ * 把底层报错压成一句人话。
+ * 典型输入（DSH 拒绝某个历史会话）：
+ *   failed to read stored session "<uuid>": subagent/descriptor 0 uses unsupported
+ *   descriptor version 2; source v0 artifact remains unchanged (raw log: C:\…\session.jsonl.zstd)
+ * 输出：`subagent/descriptor 0 uses unsupported descriptor version 2`
+ * —— 去掉会话 id 与原始日志路径，只留原因。
+ */
+function shortReason(text) {
+  let s = String(text ?? "");
+  s = s.replace(/^failed to read stored session "[^"]*":\s*/i, "");
+  s = s.split("(raw log:")[0];
+  s = s.replace(/;\s*source v0 artifact remains unchanged\s*$/i, "");
+  return truncate(s.trim(), 110);
+}
+
 /** 给 promise 套超时；超时以 reject 暴露，便于记账。 */
 function withTimeout(promise, ms, label) {
   return new Promise((resolve, reject) => {
@@ -560,7 +576,7 @@ export class AchievementsService extends TypertRemoteService {
   _composeError() {
     const parts = [];
     if (this._backfill.error) parts.push(this._backfill.error);
-    const head = this._backfill.firstFailure ? truncate(this._backfill.firstFailure, 140) : "";
+    const head = this._backfill.firstFailure ? shortReason(this._backfill.firstFailure) : "";
     if (this._backfill.failed > 0) {
       parts.push(this._backfill.failed + " 个会话读取失败" + (head ? "（首个原因：" + head + "）" : ""));
     }

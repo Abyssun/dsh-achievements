@@ -345,6 +345,23 @@ console.log("=== 6. 模型筛选（v3 分日明细）===");
     })(),
   );
 }
+{
+  // 同名不同 provider：客户端靠 models[].provider 才能把两行区分开。
+  // host 一旦漏掉 provider，界面就会显示两行一模一样的模型（真实出现过）。
+  const { s } = svc({
+    snapshots: {
+      "same-1": { session: { id: "same-1" }, inheritedEventCount: 0, events: [am(1, T0, 300, "deepseek-account::deepseek-flash")] },
+      "same-2": { session: { id: "same-2" }, inheritedEventCount: 0, events: [am(1, T0, 500, "deepseek-official::deepseek-flash")] },
+    },
+  });
+  await settle(s);
+  const res = await s.getMetrics("");
+  const same = res.models.filter((m) => m.name === "deepseek-flash");
+  ok("同名模型是两条记录", same.length === 2, JSON.stringify(res.models));
+  ok("两条的 provider 不同（客户端据此加后缀区分）", new Set(same.map((m) => m.provider)).size === 2, JSON.stringify(same));
+  ok("各自总量独立（300 / 500）", same.map((m) => m.total).sort((a, b) => a - b).join(",") === "300,500", JSON.stringify(same.map((m) => m.total)));
+  ok("两条的 key 不同", new Set(same.map((m) => m.key)).size === 2, JSON.stringify(same.map((m) => m.key)));
+}
 
 console.log("=== 7. 超时 / 失败保护：坏会话不能拖死整轮 ===");
 {

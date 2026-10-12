@@ -145,6 +145,8 @@
 .ach-model-row[data-active="true"] { background: var(--ach-bg-2); }
 .ach-model-row[data-active="true"] .ach-model-name { font-weight: 600; color: var(--ach-accent); }
 .ach-model-name { flex: 0 1 auto; min-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 同名模型（不同 provider/通道）时用来区分，否则两行看起来一模一样 */
+.ach-model-provider { margin-left: 6px; font-size: 11px; font-weight: 400; color: var(--ach-fg-dim); }
 .ach-model-bar { flex: 1 1 auto; min-width: 60px; height: 6px; border-radius: 3px; background: var(--ach-bg-2); overflow: hidden; }
 .ach-model-bar > i { display: block; height: 100%; background: var(--ach-accent); border-radius: 3px; }
 .ach-model-total { flex: 0 0 auto; min-width: 66px; text-align: right; color: var(--ach-fg-dim); font-variant-numeric: tabular-nums; }
@@ -852,16 +854,34 @@
         const modelList = (value && value.models) || [];
         const grandTotal = modelList.reduce((acc, m) => acc + (m.total || 0), 0);
         const denom = grandTotal > 0 ? grandTotal : 1;
+
+        // 模型 key 是 `provider::model`，**不同 provider 可以有同名模型**
+        // （实测 deepseek-account::deepseek-flash 与 deepseek-official::deepseek-flash
+        //  是两条通道，数据当然不同）。只显示模型名会让两行看起来一模一样 ——
+        // 所以同名时补上 provider 后缀。
+        const nameCounts = new Map();
+        for (const m of modelList) {
+          const label = m.name || m.key;
+          nameCounts.set(label, (nameCounts.get(label) || 0) + 1);
+        }
+        const isAmbiguous = (m) => (nameCounts.get(m.name || m.key) || 0) > 1;
+        const shortProvider = (m) => String(m.provider || "unknown").replace(/^deepseek-/, "");
+        const plainLabel = (m) => m.name || m.key;
+        const labelOf = (m) => (isAmbiguous(m) ? plainLabel(m) + " @" + shortProvider(m) : plainLabel(m));
+
         const activeModel = (value && value.selectedModel) || model || "";
         const activeName = (() => {
           if (!activeModel) return null;
           const hit = modelList.find((m) => m.key === activeModel);
-          return hit ? hit.name || hit.key : activeModel;
+          return hit ? labelOf(hit) : activeModel;
         })();
 
         // 状态提示：把「还没好」和「坏了」说清楚，而不是无限转圈
         const collecting = value && value.collecting;
-        const hostError = (value && value.error) || error || null;
+        const hostError = (value && value.error) || null;
+        // 只有**真的丢数据**（failed > 0）或调用失败才在个人主页上打扰用户；
+        // 「N 个会话走了原始日志兜底」这类信息性说明只在设置页展示。
+        const realLoss = Number(meta.failed ?? 0) > 0;
 
         return h(
           "div",
@@ -908,11 +928,11 @@
                 )
               : null,
 
-            hostError && !collecting
+            (error || (hostError && realLoss)) && !collecting
               ? h(
                   "div",
                   { className: "ach-notice" },
-                  h("div", null, "宿主报告：" + hostError),
+                  h("div", null, error ? "读取失败：" + error : "宿主报告：" + hostError),
                   h(
                     "div",
                     { className: "ach-diag" },
@@ -972,7 +992,14 @@
                           title: m.key,
                           onClick: () => chooseModel(m.key),
                         },
-                        h("span", { className: "ach-model-name" }, m.name || m.key),
+                        h(
+                          "span",
+                          { className: "ach-model-name" },
+                          plainLabel(m),
+                          isAmbiguous(m)
+                            ? h("span", { className: "ach-model-provider" }, "@" + shortProvider(m))
+                            : null,
+                        ),
                         h(
                           "span",
                           { className: "ach-model-bar" },
@@ -1028,6 +1055,7 @@
         const remote = props.remote;
         const account = props.account || null;
         const { value, reload } = useMetrics(remote);
+        const meta = (value && value.meta) || {};
         return h(
           "div",
           { className: "ach-root", style: { height: "auto", background: "transparent" } },
@@ -1036,6 +1064,27 @@
             { style: { padding: "4px 0" } },
             h("div", { style: { fontSize: 14, fontWeight: 600, marginBottom: 14 } }, "个人资料"),
             h(ProfileEditor, { remote, value, account, onSaved: reload }),
+            // 统计状态放在设置页：个人主页只在不丢数据时不打扰
+            h(
+              "div",
+              { style: { marginTop: 20 } },
+              h("div", { style: { fontSize: 12, color: "var(--ach-fg-dim)", marginBottom: 6 } }, "统计状态"),
+              value && value.error
+                ? h("div", { className: "ach-crop-hint", style: { textAlign: "left" } }, value.error)
+                : h("div", { className: "ach-crop-hint", style: { textAlign: "left" } }, "全部会话统计正常。"),
+              h(
+                "div",
+                { className: "ach-diag" },
+                "registry=" + String(meta.registryAvailable ?? "?") +
+                  " query=" + String(meta.queryAvailable ?? "?") +
+                  " cold=" + String(meta.cold ?? "?") +
+                  " live=" + String(meta.live ?? "?") +
+                  " failed=" + String(meta.failed ?? "?") +
+                  " raw=" + String(meta.raw ?? "?") +
+                  " timedOut=" + String(meta.timedOut ?? "?") +
+                  " snapshotMs=" + String(meta.snapshotMs ?? "?"),
+              ),
+            ),
           ),
         );
       }
