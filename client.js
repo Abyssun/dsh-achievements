@@ -96,9 +96,13 @@
   display: grid; grid-template-columns: repeat(5, 1fr); margin-top: 32px;
   border: 1px solid var(--ach-border); border-radius: 14px; overflow: hidden; background: var(--ach-bg-1);
 }
-.ach-card { padding: 16px 12px; text-align: center; border-right: 1px solid var(--ach-border); }
+.ach-card { position: relative; padding: 16px 12px; text-align: center; border-right: 1px solid var(--ach-border); }
 .ach-card:last-child { border-right: none; }
+/* 有精确值的卡片：鼠标悬停时把「8.04亿」换成逐位精确值 */
+.ach-card--exactable { cursor: help; }
+.ach-card--exactable:hover { background: var(--ach-bg-2); }
 .ach-card-value { font-size: 20px; font-weight: 600; line-height: 1.3; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ach-card-value--exact { font-size: 15px; letter-spacing: -0.2px; }
 .ach-card-label { margin-top: 4px; font-size: 12px; color: var(--ach-fg-dim); }
 .ach-section { margin-top: 40px; }
 .ach-section-title { display: flex; align-items: center; justify-content: space-between; font-size: 15px; font-weight: 600; margin-bottom: 12px; }
@@ -439,11 +443,29 @@
         );
       }
 
+      /**
+       * 一张统计卡片。
+       * @param props.exact 精确值（逐位，带千分位）。给了它就**鼠标悬停时把缩略值换成它** ——
+       *   「8.04亿」看不出在动，悬停一下就能看到 803,xxx,xxx 到底是多少。
+       */
       function StatCard(props) {
+        const [hover, setHover] = React.useState(false);
+        const exactable = typeof props.exact === "string" && props.exact !== "";
+        const showExact = hover && exactable;
+        const cls = "ach-card" + (exactable ? " ach-card--exactable" : "");
+        const valueCls = "ach-card-value" + (showExact ? " ach-card-value--exact" : "");
+        const tip = exactable
+          ? "精确值：" + props.exact + (props.note ? "（" + props.note + "）" : "")
+          : props.hint || undefined;
         return h(
           "div",
-          { className: "ach-card" },
-          h("div", { className: "ach-card-value", title: props.title || undefined }, props.value),
+          {
+            className: cls,
+            onMouseEnter: exactable ? () => setHover(true) : undefined,
+            onMouseLeave: exactable ? () => setHover(false) : undefined,
+            title: tip,
+          },
+          h("div", { className: valueCls }, showExact ? props.exact : props.value),
           h("div", { className: "ach-card-label" }, props.label),
         );
       }
@@ -871,11 +893,28 @@
         }, [value]);
 
         const cardNodes = [
-          h(StatCard, { key: "c1", label: "累计 Token 数", value: formatTokens(cards.cumulativeTokens), title: "精确值：" + exactTokens(cards.cumulativeTokens) }),
-          h(StatCard, { key: "c2", label: "Token 使用峰值", value: formatTokens(cards.peakDayTokens), title: "精确值：" + exactTokens(cards.peakDayTokens) + (cards.peakDay ? "（" + cards.peakDay + "）" : "") }),
-          h(StatCard, { key: "c3", label: "最长任务用时", value: formatDuration(cards.longestTaskMs), title: "相邻事件间隔超过 30 分钟即切分为新的作业段，取最长的一段" }),
-          h(StatCard, { key: "c4", label: "最长连续天数", value: (cards.longestStreak ?? 0) + " 天", title: "有 Token 消耗的本地日历日" }),
-          h(StatCard, { key: "c5", label: "当前连续天数", value: (cards.currentStreak ?? 0) + " 天", title: "从今天（今天没有消耗则从昨天）往前连续计算" }),
+          h(StatCard, {
+            key: "c1",
+            label: "累计 Token 数",
+            value: formatTokens(cards.cumulativeTokens),
+            exact: exactTokens(cards.cumulativeTokens),
+          }),
+          h(StatCard, {
+            key: "c2",
+            label: "Token 使用峰值",
+            value: formatTokens(cards.peakDayTokens),
+            exact: exactTokens(cards.peakDayTokens),
+            note: cards.peakDay ? "峰值日 " + cards.peakDay : undefined,
+          }),
+          h(StatCard, {
+            key: "c3",
+            label: "最长任务用时",
+            value: formatDuration(cards.longestTaskMs),
+            exact: exactTokens(cards.longestTaskMs) + " ms",
+            note: "相邻事件间隔 > 30 分钟即切成新的作业段，取最长的一段",
+          }),
+          h(StatCard, { key: "c4", label: "最长连续天数", value: (cards.longestStreak ?? 0) + " 天", hint: "有 Token 消耗的本地日历日" }),
+          h(StatCard, { key: "c5", label: "当前连续天数", value: (cards.currentStreak ?? 0) + " 天", hint: "从今天（今天没有消耗则从昨天）往前连续计算" }),
         ];
 
         // 模型目录（**不随筛选变化**，否则筛完就没法切回去）与占比
@@ -1017,7 +1056,7 @@
                           type: "button",
                           className: "ach-model-row",
                           "data-active": String(activeModel === m.key),
-                          title: m.key,
+                          title: m.key + " · " + exactTokens(m.total) + " token",
                           onClick: () => chooseModel(m.key),
                         },
                         h(
