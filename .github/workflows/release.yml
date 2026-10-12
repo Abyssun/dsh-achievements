@@ -95,46 +95,75 @@ jobs:
     permissions:
       contents: write
     steps:
+      # 需要 checkout 才能读 CHANGELOG.md（Release 正文的「本版更新」就来自它）
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           name: tarball
+
+      - name: 从 CHANGELOG.md 抽取本版更新
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          echo "tag=${GITHUB_REF_NAME} version=${version}"
+
+          # 段落格式：'## [<version>] - <date>'（方括号可省），到下一个 '## ' 为止。
+          # 末尾的 ([^0-9.]|$) 防止 0.1.4 误匹配 0.1.40。
+          awk -v ver="$version" '
+            $0 ~ ("^## \\[?" ver "\\]?([^0-9.]|$)") { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md | sed '/./,$!d' > changelog-section.md
+
+          if [ ! -s changelog-section.md ]; then
+            echo "::error::CHANGELOG.md 里找不到 ${version} 的段落。发版前必须先在 CHANGELOG.md 写更新说明（格式：## [${version}] - <日期>）。"
+            exit 1
+          fi
+          echo "--- 抽到的更新说明 ---"
+          cat changelog-section.md
+
+      - name: 组装 Release 正文
+        run: |
+          set -euo pipefail
+          tarball='${{ needs.pack.outputs.tarball }}'
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${tarball}"
+          {
+            echo "## 本版更新"
+            echo
+            cat changelog-section.md
+            echo
+            echo "## 安装"
+            echo
+            echo "推荐跟随 main（应用内插件市场 / 插件管理里填来源）："
+            echo
+            echo '```'
+            echo "github:${GITHUB_REPOSITORY}"
+            echo '```'
+            echo
+            echo "想钉死版本就用 commit："
+            echo
+            echo '```'
+            echo "github:${GITHUB_REPOSITORY}#${{ github.sha }}"
+            echo '```'
+            echo
+            echo "或直接用本 Release 的产物："
+            echo
+            echo '```bash'
+            echo "pnpm add ${url}"
+            echo '```'
+            echo
+            echo "> 装完**必须重启 DSH**：已装插件没有热重载。"
+          } > release-body.md
+          cat release-body.md
 
       - name: 生成 Release
         uses: softprops/action-gh-release@v2
         with:
           files: '*.tgz'
+          body_path: release-body.md
+          # 正文末尾会自动追加 “Full Changelog: compare/v上一版...v本版”
           generate_release_notes: true
-          body: |
-            `dsh-achievements` v${{ needs.pack.outputs.version }} —— DeepSeek Harness 个人成就插件。
-
-            ## 安装（推荐：跟随 main）
-
-            在应用内的插件市场 / 插件管理里，来源填：
-
-            ```
-            github:Abyssun/dsh-achievements
-            ```
-
-            想钉死版本就用 commit：
-
-            ```
-            github:Abyssun/dsh-achievements#${{ github.sha }}
-            ```
-
-            ## 安装（本 Release 的产物）
-
-            ```bash
-            dsh plugin --profile <profile> add \
-              https://github.com/Abyssun/dsh-achievements/releases/download/${{ github.ref_name }}/${{ needs.pack.outputs.tarball }}
-            ```
-
-            或在 profile 目录里：
-
-            ```bash
-            pnpm add https://github.com/Abyssun/dsh-achievements/releases/download/${{ github.ref_name }}/${{ needs.pack.outputs.tarball }}
-            ```
-
-            > 装完**必须重启 DSH**：已装插件没有热重载。
 
   publish-npm:
     name: 发布到 npm（OIDC，默认关闭）

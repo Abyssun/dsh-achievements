@@ -1,6 +1,6 @@
 {
   "name": "dsh-achievements",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Abyssun/dsh-achievements.git"
@@ -25,7 +25,8 @@
     "client.js",
     "typert.host.js",
     "cordis.patch.yml",
-    "lib"
+    "lib",
+    "CHANGELOG.md"
   ],
   "license": "MIT",
   "engines": {
