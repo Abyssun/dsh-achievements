@@ -121,6 +121,8 @@ const metricsValueSchema = z
         failed: z.number(),
       })
       .readonly(),
+    /** 当前筛选的模型；null = 全部 */
+    selectedModel: z.union([z.string(), z.null()]),
     error: z.union([z.string(), z.null()]),
     generatedAt: z.number(),
     identity: identitySchema,
@@ -133,12 +135,21 @@ const metricsValueSchema = z
   })
   .readonly();
 
-const metricsResultSchema = z.union([
-  z.object({ ok: z.literal(true).readonly(), value: metricsValueSchema }).readonly(),
-  z.object({ ok: z.literal(false).readonly(), error: failureSchema }).readonly(),
-]);
+/**
+ * ⚠️⚠️ `result.schema` 描述的是**方法的原始返回值**，**不含** `{ok, value}` 信封 ——
+ * 信封由**传输层**加。权威依据：官方 `dsh-api-account-controller` 的
+ * `#account/getProfile` 把 result 声明成裸的
+ * `null | {status:'ready', value:{…}} | {status:'failed'}`，其实现就是
+ * `getProfile(client) { return this.ctx.deepseekAccount.getProfile(client); }`。
+ *
+ * 这里曾经把信封写进 schema（host 便照着返回信封），于是客户端拿到
+ * `{ok:true, value:{ok:true, value:真正的快照}}`：每个字段都读不到，
+ * 页面表现成「5 张卡片全 0、`截至 Invalid Date`、诊断全是 `?`、且不报任何错」。
+ * 因为 host 与 schema 是**自洽**的，strict 校验也照样通过 —— 这类错特别难查。
+ */
+const metricsResultSchema = metricsValueSchema;
 
-const createMetricsResult = () => metricsResultSchema;
+const createMetricsResult = () => metricsValueSchema;
 
 // ---- setProfile ----------------------------------------------------------
 
@@ -157,14 +168,20 @@ const profileValueSchema = z
   })
   .readonly();
 
-const profileResultSchema = z.union([
-  z.object({ ok: z.literal(true).readonly(), value: profileValueSchema }).readonly(),
-  z.object({ ok: z.literal(false).readonly(), error: failureSchema }).readonly(),
-]);
+const profileResultSchema = profileValueSchema;
 
-const createProfileResult = () => profileResultSchema;
+const createProfileResult = () => profileValueSchema;
 
 const createProfileInput = () => profileInputSchema;
+
+/**
+ * `getMetrics(model)` 的参数：`provider::model` 字符串；**空串 = 全部模型**。
+ * 用空串而不是可选项/null，是因为「可选参数」在这种严格 codec 下的语义没把握，
+ * 而客户端每次都显式传一个值最稳。
+ */
+const modelParamSchema = z.string();
+
+const createModelParam = () => modelParamSchema;
 
 // ---- manifest ------------------------------------------------------------
 
@@ -179,10 +196,22 @@ export const TYPERT = {
       namespace: "achievements",
       method: "getMetrics",
       invocation: { kind: "direct" },
-      parameters: [],
+      parameters: [
+        {
+          name: "model",
+          wire: "model",
+          source: "json",
+          codec: {
+            mode: "strict",
+            typeSymbol: "dsh-achievements#achievements/getMetrics:model",
+            schema: modelParamSchema,
+            create: createModelParam,
+          },
+        },
+      ],
       result: {
         mode: "strict",
-        typeSymbol: "dsh-achievements#MetricsResult",
+        typeSymbol: "dsh-achievements#MetricsSnapshot",
         schema: metricsResultSchema,
         create: createMetricsResult,
       },
@@ -230,9 +259,9 @@ export const TYPERT = {
           {
             kind: "method",
             name: "getMetrics",
-            signature: "@Remote('getMetrics') async getMetrics(): Promise<MetricsResult>",
+            signature: "@Remote('getMetrics') async getMetrics(model: string): Promise<MetricsSnapshot>",
             summary:
-              "Return the whole-history snapshot: 5 profile cards, overview metrics, per-day and per-model breakdown.",
+              "Return the whole-history snapshot: 5 profile cards, overview metrics, per-day and per-model breakdown. Pass \"\" for all models.",
             jsDoc:
               "/**\n * Aggregate every session's ledger (live sessions through the official\n * session-projection registry, cold ones from a cached log fold) into the\n * profile cards and dashboard metrics.\n * @returns success with the snapshot, or a business failure.\n */",
           },

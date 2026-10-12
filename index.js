@@ -82,7 +82,14 @@ const ledgerSchema = z.object({
   seen: z.number(),
   days: z.record(z.string(), dayRecordSchema),
   hours: z.record(z.string(), z.number()),
-  models: z.record(z.string(), z.number()),
+  /** v3 起：`provider::model` → { total, days: { 'YYYY-MM-DD' → 当日聚合 } } */
+  models: z.record(
+    z.string(),
+    z.object({
+      total: z.number(),
+      days: z.record(z.string(), dayRecordSchema),
+    }),
+  ),
   totals: z.object({
     total: z.number(),
     input: z.number(),
@@ -448,8 +455,11 @@ export class AchievementsService extends TypertRemoteService {
     return hit ? hit.ledger : null;
   }
 
-  /** 组织成给客户端看的 wire 值（形状必须与 typert.host.js 的 schema 逐字段一致）。 */
-  _snapshot() {
+  /**
+   * 组织成给客户端看的 wire 值（形状必须与 typert.host.js 的 schema 逐字段一致）。
+   * @param {string|null} modelKey 只统计这个 `provider::model`；null = 全部
+   */
+  _snapshot(modelKey = null) {
     const started = Date.now();
     const liveIds = this._liveIdSet();
     const registry = this._registryReady ? this._getService("sessionProjections") : null;
@@ -486,13 +496,15 @@ export class AchievementsService extends TypertRemoteService {
       /* 活会话取不到就只报冷会话 */
     }
 
-    const m = computeMetrics(ledgers, Date.now());
+    const m = computeMetrics(ledgers, Date.now(), modelKey);
     const cfg = readConfig();
     this._lastMs = Date.now() - started;
 
     return {
       ready: this._backfill.done,
       collecting: !this._backfill.done,
+      /** 当前筛选的模型（null = 全部） */
+      selectedModel: typeof m.selectedModel === "string" ? m.selectedModel : null,
       progress: {
         done: num(this._backfill.doneCount),
         total: num(this._backfill.total),
@@ -540,9 +552,10 @@ export class AchievementsService extends TypertRemoteService {
         }))
         .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0)),
       models: Object.entries(m.models)
-        .map(([key, total]) => {
+        .map(([key, rec]) => {
           const s = splitModelKey(key);
-          return { key, name: s.name, provider: s.provider, total: num(total) };
+          const total = typeof rec === "number" ? rec : num(rec && rec.total);
+          return { key, name: s.name, provider: s.provider, total };
         })
         .sort((a, b) => b.total - a.total),
       meta: {
@@ -564,49 +577,62 @@ export class AchievementsService extends TypertRemoteService {
 
   /**
    * 指标快照。**只读内存**，立刻返回 —— 重量级 IO 全在后台回填里。
-   * @returns {Promise<{ok: true, value: object} | {ok: false, error: {code: string, message: string}}>}
+   *
+   * ⚠️⚠️ **必须返回原始值，不要自己套 `{ok, value}` 信封。**
+   * 信封是**传输层**加的：官方 `dsh-api-account-controller` 的实现就是
+   * `getProfile(client) { return this.ctx.deepseekAccount.getProfile(client); }`，
+   * 而它 manifest 里的 `result` schema 描述的正是这个**原始返回值**。
+   * 我在这里自己包了一层，客户端于是拿到
+   * `{ok:true, value:{ok:true, value:真正的快照}}` —— 每个字段都读不到，
+   * 界面表现成「5 张卡片全 0、`截至 Invalid Date`、诊断全是 `?`、**而且不报任何错**」。
+   * 失败请直接 `throw`，传输层会转成 `{ok:false, error}`。
+   *
+   * @param {string|null} model 只统计这个 `provider::model`；null/省略 = 全部
+   * @returns {Promise<object>} 原始快照
    */
-  async getMetrics() {
+  async getMetrics(model) {
+    const modelKey = typeof model === "string" && model !== "" ? model : null;
     try {
-      return { ok: true, value: this._snapshot() };
+      return this._snapshot(modelKey);
     } catch (e) {
-      return { ok: false, error: { code: "achievements_unavailable", message: msg(e) } };
+      throw new Error("achievements 聚合失败: " + msg(e));
     }
   }
 
   /**
    * 保存个人资料（昵称 / 头像），落到 `<DSH_HOME>/data/dsh-achievements/config.json`。
    * 头像可以是 http(s) URL，也可以是客户端裁好的 `data:image/...;base64,...`。
+   * 同样**返回原始值**（见 getMetrics 的说明）；校验失败直接 throw。
    *
    * @param {{nickname?: string|null, avatar?: string|null}} input
-   * @returns {Promise<{ok: true, value: {saved: boolean, nickname: string|null, avatar: string|null}} | {ok: false, error: {code: string, message: string}}>}
+   * @returns {Promise<{saved: boolean, nickname: string|null, avatar: string|null}>}
    */
   async setProfile(input) {
-    try {
-      const patch = input && typeof input === "object" ? input : {};
-      const current = readConfig();
+    const patch = input && typeof input === "object" ? input : {};
+    const current = readConfig();
 
-      let nickname = current.nickname;
-      if (Object.prototype.hasOwnProperty.call(patch, "nickname")) {
-        if (patch.nickname === null) nickname = null;
-        else if (typeof patch.nickname === "string") {
-          const t = patch.nickname.trim();
-          nickname = t === "" ? null : t.slice(0, 64);
-        }
+    let nickname = current.nickname;
+    if (Object.prototype.hasOwnProperty.call(patch, "nickname")) {
+      if (patch.nickname === null) nickname = null;
+      else if (typeof patch.nickname === "string") {
+        const t = patch.nickname.trim();
+        nickname = t === "" ? null : t.slice(0, 64);
       }
-
-      let avatar = current.avatar;
-      if (Object.prototype.hasOwnProperty.call(patch, "avatar")) {
-        const norm = normalizeAvatar(patch.avatar);
-        if (!norm.ok) return { ok: false, error: { code: "avatar_invalid", message: norm.reason } };
-        avatar = norm.value;
-      }
-
-      writeConfig({ nickname, avatar });
-      return { ok: true, value: { saved: true, nickname, avatar } };
-    } catch (e) {
-      return { ok: false, error: { code: "profile_write_failed", message: msg(e) } };
     }
+
+    let avatar = current.avatar;
+    if (Object.prototype.hasOwnProperty.call(patch, "avatar")) {
+      const norm = normalizeAvatar(patch.avatar);
+      if (!norm.ok) throw new Error(norm.reason);
+      avatar = norm.value;
+    }
+
+    try {
+      writeConfig({ nickname, avatar });
+    } catch (e) {
+      throw new Error("写入资料失败: " + msg(e));
+    }
+    return { saved: true, nickname, avatar };
   }
 }
 

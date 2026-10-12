@@ -127,8 +127,11 @@ console.log('=== 3. 分桶（日历日 / 小时 / 模型） ===');
   eq('小时桶按本地小时 9 点（跨天合并：100 + 次日 400）', led.hours['9'], 500);
   eq('小时桶 10 点', led.hours['10'], 200);
   eq('小时桶跨天聚合，不是按日切分', Object.keys(led.hours).length, 2);
-  eq('模型桶按 provider::model', led.models['deepseek-official::deepseek-v4-pro'], 300);
-  eq('第二个模型单独一桶', led.models['deepseek-official::other-model'], 400);
+  // v3 起模型桶是 { total, days: { 'YYYY-MM-DD' → 当日聚合 } }，不再是纯数字
+  eq('模型桶按 provider::model', led.models['deepseek-official::deepseek-v4-pro']?.total, 300);
+  eq('模型桶带分日明细', led.models['deepseek-official::deepseek-v4-pro']?.days?.['2026-01-10']?.total, 300);
+  eq('第二个模型单独一桶', led.models['deepseek-official::other-model']?.total, 400);
+  eq('第二个模型的分日明细也独立', led.models['deepseek-official::other-model']?.days?.['2026-01-11']?.total, 400);
   eq('首末时间推进', led.last - led.first, DAY);
 }
 {

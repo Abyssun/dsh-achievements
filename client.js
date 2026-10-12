@@ -134,6 +134,21 @@
 .ach-crop-canvas:active { cursor: grabbing; }
 .ach-crop-hint { font-size: 11px; color: var(--ach-fg-dim); text-align: center; }
 .ach-crop-range { width: 256px; margin: 0 auto; }
+.ach-model-list { border: 1px solid var(--ach-border); border-radius: 14px; overflow: hidden; background: var(--ach-bg-1); }
+.ach-model-row {
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 14px;
+  background: transparent; border: none; border-bottom: 1px solid var(--ach-border);
+  cursor: pointer; text-align: left; color: inherit; font-size: 13px; font-family: inherit;
+}
+.ach-model-row:last-child { border-bottom: none; }
+.ach-model-row:hover { background: var(--ach-bg-2); }
+.ach-model-row[data-active="true"] { background: var(--ach-bg-2); }
+.ach-model-row[data-active="true"] .ach-model-name { font-weight: 600; color: var(--ach-accent); }
+.ach-model-name { flex: 0 1 auto; min-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ach-model-bar { flex: 1 1 auto; min-width: 60px; height: 6px; border-radius: 3px; background: var(--ach-bg-2); overflow: hidden; }
+.ach-model-bar > i { display: block; height: 100%; background: var(--ach-accent); border-radius: 3px; }
+.ach-model-total { flex: 0 0 auto; min-width: 66px; text-align: right; color: var(--ach-fg-dim); font-variant-numeric: tabular-nums; }
+.ach-model-pct { flex: 0 0 auto; width: 40px; text-align: right; color: var(--ach-fg-dim); font-variant-numeric: tabular-nums; }
 .ach-diag { font-size: 11px; color: var(--ach-fg-dim); font-variant-numeric: tabular-nums; }
 `;
 
@@ -151,10 +166,22 @@
             namespace: "achievements",
             method: "getMetrics",
             invocation: { kind: "direct" },
-            parameters: [],
+            parameters: [
+              {
+                name: "model",
+                wire: "model",
+                source: "json",
+                codec: {
+                  mode: "strict",
+                  typeSymbol: "dsh-achievements#achievements/getMetrics:model",
+                  schema: passthrough(),
+                  create: createPassthrough,
+                },
+              },
+            ],
             result: {
               mode: "strict",
-              typeSymbol: "dsh-achievements#MetricsResult",
+              typeSymbol: "dsh-achievements#MetricsSnapshot",
               schema: passthrough(),
               create: createPassthrough,
             },
@@ -308,8 +335,10 @@
         return {
           nickname: ownNickname || accName || null,
           avatar: ownAvatar || accAvatar || null,
-          /** 展示用的 ID：优先账号 id，其次 contact，最后本地匿名 UUID */
-          uid: (account && (account.id || account.contact)) || (own && own.anonymousUserId) || null,
+          /** 账号身份（id 或 contact）—— 有才显示，不把本机匿名 UUID 当 ID 露在个人主页上 */
+          accountId: (account && (account.id || account.contact)) || null,
+          /** 本机匿名 id（UUID）：只在设置页当「唯一标识」说明用 */
+          anonymousId: (own && own.anonymousUserId) || null,
           nicknameFromAccount: !ownNickname && !!accName,
           avatarFromAccount: !ownAvatar && !!accAvatar,
           accountAvailable: !!account,
@@ -317,7 +346,11 @@
       }
 
       // ---- 数据 hook --------------------------------------------------------
-      function useMetrics(remote) {
+      /**
+       * @param {object} remote 已挂载的 `remote.achievements`
+       * @param {string} model 模型筛选（`provider::model`）；空串 = 全部
+       */
+      function useMetrics(remote, model) {
         const [state, setState] = React.useState({ loading: true, value: null, error: null, lastAt: 0 });
         const aliveRef = React.useRef(true);
         const inFlightRef = React.useRef(false);
@@ -334,7 +367,9 @@
           inFlightRef.current = true;
           if (aliveRef.current) setState((s) => ({ ...s, loading: true }));
           try {
-            const res = await callWithTimeout(() => remote.getMetrics(), CALL_TIMEOUT_MS, "getMetrics");
+            // ⚠️ 返回值是**原始快照**：`{ok, value}` 信封由传输层加，所以取 res.value。
+            //    （曾因 host 自己也套了一层信封，变成双层 → 字段全读不到却不报错。）
+            const res = await callWithTimeout(() => remote.getMetrics(model || ""), CALL_TIMEOUT_MS, "getMetrics");
             if (!aliveRef.current) return;
             if (res && res.ok === true) {
               setState({ loading: false, value: res.value, error: null, lastAt: Date.now() });
@@ -346,7 +381,7 @@
           } finally {
             inFlightRef.current = false;
           }
-        }, [remote]);
+        }, [remote, model]);
 
         React.useEffect(() => {
           aliveRef.current = true;
@@ -766,7 +801,11 @@
             effective.accountAvailable
               ? "默认取 DSH 账号的昵称与头像；你也可以自己改，改完以你的为准。"
               : "没有读到 DSH 账号资料（未登录或该部署未挂载账号服务），这里填的就是最终显示值。",
-            effective.uid ? h("div", null, "唯一标识：" + (effective.uid.length > 24 ? effective.uid : "@" + effective.uid)) : null,
+            effective.accountId
+              ? h("div", null, "账号 ID：" + effective.accountId)
+              : effective.anonymousId
+                ? h("div", null, "本机匿名 ID（仅本地，不对外）：" + effective.anonymousId)
+                : null,
           ),
         );
       }
@@ -775,9 +814,14 @@
       function AchievementsPage(props) {
         const remote = props.remote;
         const account = props.account || null;
-        const { loading, value, error, lastAt, reload } = useMetrics(remote);
+        const [model, setModel] = React.useState("");
+        const { loading, value, error, lastAt, reload } = useMetrics(remote, model);
         const [editing, setEditing] = React.useState(false);
         const onToggleEdit = React.useCallback(() => setEditing((v) => !v), []);
+        /** 点当前已选中的模型 = 取消筛选；点「全部模型」恒为取消。 */
+        const chooseModel = React.useCallback((key) => {
+          setModel((cur) => (key !== "" && cur === key ? "" : key));
+        }, []);
         const onSaved = React.useCallback(() => {
           setEditing(false);
           reload();
@@ -804,6 +848,17 @@
           h(StatCard, { key: "c5", label: "当前连续天数", value: (cards.currentStreak ?? 0) + " 天", title: "从今天（今天没有消耗则从昨天）往前连续计算" }),
         ];
 
+        // 模型目录（**不随筛选变化**，否则筛完就没法切回去）与占比
+        const modelList = (value && value.models) || [];
+        const grandTotal = modelList.reduce((acc, m) => acc + (m.total || 0), 0);
+        const denom = grandTotal > 0 ? grandTotal : 1;
+        const activeModel = (value && value.selectedModel) || model || "";
+        const activeName = (() => {
+          if (!activeModel) return null;
+          const hit = modelList.find((m) => m.key === activeModel);
+          return hit ? hit.name || hit.key : activeModel;
+        })();
+
         // 状态提示：把「还没好」和「坏了」说清楚，而不是无限转圈
         const collecting = value && value.collecting;
         const hostError = (value && value.error) || error || null;
@@ -814,17 +869,33 @@
           h(
             "div",
             { className: "ach-wrap" },
-            h(Avatar, { src: identity.avatar, name: identity.nickname || "?", className: "ach-avatar" }),
-            h("div", { className: "ach-name" }, identity.nickname || "未命名用户"),
-            h("div", { className: "ach-uid" }, identity.uid ? (identity.uid.length > 24 ? identity.uid : "@" + identity.uid) : "@未设置"),
             h(
               "div",
-              { className: "ach-toolbar" },
-              h("button", { className: "ach-ghost", type: "button", onClick: reload, title: "立即刷新" }, loading ? "刷新中…" : "刷新"),
-              h("button", { className: "ach-ghost", type: "button", onClick: onToggleEdit, title: "编辑昵称与头像" }, editing ? "收起编辑" : "编辑资料"),
+              { className: "ach-head" },
+              h(Avatar, { src: identity.avatar, name: identity.nickname || "?" }),
+              h("div", { className: "ach-name" }, identity.nickname || "未命名用户"),
+              // 只有拿到**账号**身份才显示这一行；本机匿名 UUID 不往主页上摆
+              identity.accountId
+                ? h("div", { className: "ach-uid" }, identity.accountId.length > 40 ? identity.accountId : "@" + identity.accountId)
+                : null,
+              h(
+                "div",
+                { className: "ach-toolbar" },
+                h("button", { className: "ach-ghost", type: "button", onClick: reload, title: "立即刷新" }, loading ? "刷新中…" : "刷新"),
+                h("button", { className: "ach-ghost", type: "button", onClick: onToggleEdit, title: "编辑昵称与头像" }, editing ? "收起编辑" : "编辑资料"),
+              ),
             ),
 
             h("div", { className: "ach-cards" }, cardNodes),
+
+            activeName
+              ? h(
+                  "div",
+                  { className: "ach-notice", style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 } },
+                  h("span", null, "当前只看模型：" + activeName),
+                  h("button", { className: "ach-ghost", type: "button", onClick: () => chooseModel("") }, "查看全部"),
+                )
+              : null,
 
             collecting
               ? h(
@@ -865,21 +936,56 @@
             h(
               "div",
               { className: "ach-section" },
-              h("div", { className: "ach-section-title" }, h("span", null, "精选作品")),
               h(
                 "div",
-                { className: "ach-placeholder" },
-                h(
-                  "svg",
-                  { width: 72, height: 48, viewBox: "0 0 72 48", fill: "none", stroke: "currentColor", strokeWidth: 1.5 },
-                  h("rect", { key: "w", x: 8, y: 4, width: 56, height: 40, rx: 4 }),
-                  h("path", { key: "l", d: "M14 12h14M14 18h10" }),
-                  h("circle", { key: "c", cx: 40, cy: 26, r: 8 }),
-                  h("path", { key: "m", d: "M32 26h16M40 18a14 14 0 0 1 0 16M40 18a14 14 0 0 0 0 16" }),
-                ),
-                h("div", { className: "ach-placeholder-text" }, "在你的个人资料中展示网站"),
-                h("button", { className: "ach-ghost", type: "button", disabled: true, title: "即将支持" }, "创建网站"),
+                { className: "ach-section-title" },
+                h("span", null, "模型用量"),
+                h("span", { style: { fontSize: 12, fontWeight: 400, color: "var(--ach-fg-dim)" } }, "点一行即可只看该模型"),
               ),
+              modelList.length === 0
+                ? h("div", { className: "ach-placeholder" }, h("div", { className: "ach-placeholder-text" }, "还没有读到模型用量（等后台扫描完成后就会出现）"))
+                : h(
+                    "div",
+                    { className: "ach-model-list" },
+                    h(
+                      "button",
+                      {
+                        key: "__all",
+                        type: "button",
+                        className: "ach-model-row",
+                        "data-active": String(activeModel === ""),
+                        onClick: () => chooseModel(""),
+                      },
+                      h("span", { className: "ach-model-name" }, "全部模型"),
+                      h("span", { className: "ach-model-bar" }),
+                      h("span", { className: "ach-model-total" }, formatTokens(grandTotal)),
+                      h("span", { className: "ach-model-pct" }, grandTotal > 0 ? "100%" : "—"),
+                    ),
+                    modelList.slice(0, 12).map((m) =>
+                      h(
+                        "button",
+                        {
+                          key: m.key,
+                          type: "button",
+                          className: "ach-model-row",
+                          "data-active": String(activeModel === m.key),
+                          title: m.key,
+                          onClick: () => chooseModel(m.key),
+                        },
+                        h("span", { className: "ach-model-name" }, m.name || m.key),
+                        h(
+                          "span",
+                          { className: "ach-model-bar" },
+                          h("i", { style: { width: Math.max(2, Math.round(((m.total || 0) / denom) * 100)) + "%" } }),
+                        ),
+                        h("span", { className: "ach-model-total" }, formatTokens(m.total)),
+                        h("span", { className: "ach-model-pct" }, Math.round(((m.total || 0) / denom) * 100) + "%"),
+                      ),
+                    ),
+                  ),
+              activeModel
+                ? h("div", { className: "ach-crop-hint", style: { textAlign: "left", marginTop: 8 } }, "「最长任务用时」是会话级指标，没有模型维度，筛选时它仍是全局值。")
+                : null,
             ),
 
             h(
