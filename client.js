@@ -223,9 +223,16 @@
       function formatTokens(n) {
         if (typeof n !== "number" || !isFinite(n)) return "0";
         const abs = Math.abs(n);
-        if (abs >= 1e8) return (n / 1e8).toFixed(1) + "亿";
-        if (abs >= 1e4) return (n / 1e4).toFixed(1) + "万";
+        // 保留 2 位小数：亿位只留 1 位的话，一轮对话涨几百万也看不出变化
+        // （曾经因此让人以为「没有在统计」）。
+        if (abs >= 1e8) return (n / 1e8).toFixed(2) + "亿";
+        if (abs >= 1e4) return (n / 1e4).toFixed(2) + "万";
         return String(Math.round(n));
+      }
+      /** 精确数值（带千分位），放在 title 里，方便核对具体到个位。 */
+      function exactTokens(n) {
+        if (typeof n !== "number" || !isFinite(n)) return "0";
+        return Math.round(n).toLocaleString("en-US");
       }
       function formatDuration(ms) {
         if (typeof ms !== "number" || !isFinite(ms) || ms <= 0) return "0 分";
@@ -354,6 +361,9 @@
        */
       function useMetrics(remote, model) {
         const [state, setState] = React.useState({ loading: true, value: null, error: null, lastAt: 0 });
+        /** 上一次成功的累计值，用来算「本次刷新涨了多少」——这是「真的在统计」最直接的证据 */
+        const [delta, setDelta] = React.useState({ amount: 0, at: 0 });
+        const prevTotalRef = React.useRef(null);
         const aliveRef = React.useRef(true);
         const inFlightRef = React.useRef(false);
 
@@ -374,6 +384,12 @@
             const res = await callWithTimeout(() => remote.getMetrics(model || ""), CALL_TIMEOUT_MS, "getMetrics");
             if (!aliveRef.current) return;
             if (res && res.ok === true) {
+              const total = res.value && res.value.cards ? Number(res.value.cards.cumulativeTokens) : null;
+              const prev = prevTotalRef.current;
+              if (Number.isFinite(total)) {
+                if (prev !== null) setDelta({ amount: total - prev, at: Date.now() });
+                prevTotalRef.current = total;
+              }
               setState({ loading: false, value: res.value, error: null, lastAt: Date.now() });
             } else {
               setState((s) => ({ ...s, loading: false, error: (res && res.error && res.error.message) || "读取失败" }));
@@ -395,7 +411,16 @@
           };
         }, [load]);
 
-        return { loading: state.loading, value: state.value, error: state.error, lastAt: state.lastAt, reload: load };
+        return { loading: state.loading, value: state.value, error: state.error, lastAt: state.lastAt, delta, reload: load };
+      }
+
+      /** 每秒重渲染一次，用于显示「N 秒前刷新」——让人一眼看出是在实时刷新。 */
+      function useTicker() {
+        const [, force] = React.useState(0);
+        React.useEffect(() => {
+          const timer = setInterval(() => force((n) => n + 1), 1000);
+          return () => clearInterval(timer);
+        }, []);
       }
 
       // ---- 小组件 -----------------------------------------------------------
@@ -817,7 +842,10 @@
         const remote = props.remote;
         const account = props.account || null;
         const [model, setModel] = React.useState("");
-        const { loading, value, error, lastAt, reload } = useMetrics(remote, model);
+        const { loading, value, error, lastAt, delta, reload } = useMetrics(remote, model);
+        useTicker();
+        /** 距上次成功刷新的秒数（每秒跟着 ticker 重算，所以能看出「在动」）。 */
+        const agoSec = lastAt ? Math.max(0, Math.round((Date.now() - lastAt) / 1000)) : null;
         const [editing, setEditing] = React.useState(false);
         const onToggleEdit = React.useCallback(() => setEditing((v) => !v), []);
         /** 点当前已选中的模型 = 取消筛选；点「全部模型」恒为取消。 */
@@ -843,8 +871,8 @@
         }, [value]);
 
         const cardNodes = [
-          h(StatCard, { key: "c1", label: "累计 Token 数", value: formatTokens(cards.cumulativeTokens), title: String(cards.cumulativeTokens ?? 0) }),
-          h(StatCard, { key: "c2", label: "Token 使用峰值", value: formatTokens(cards.peakDayTokens), title: String(cards.peakDay || "") }),
+          h(StatCard, { key: "c1", label: "累计 Token 数", value: formatTokens(cards.cumulativeTokens), title: "精确值：" + exactTokens(cards.cumulativeTokens) }),
+          h(StatCard, { key: "c2", label: "Token 使用峰值", value: formatTokens(cards.peakDayTokens), title: "精确值：" + exactTokens(cards.peakDayTokens) + (cards.peakDay ? "（" + cards.peakDay + "）" : "") }),
           h(StatCard, { key: "c3", label: "最长任务用时", value: formatDuration(cards.longestTaskMs), title: "相邻事件间隔超过 30 分钟即切分为新的作业段，取最长的一段" }),
           h(StatCard, { key: "c4", label: "最长连续天数", value: (cards.longestStreak ?? 0) + " 天", title: "有 Token 消耗的本地日历日" }),
           h(StatCard, { key: "c5", label: "当前连续天数", value: (cards.currentStreak ?? 0) + " 天", title: "从今天（今天没有消耗则从昨天）往前连续计算" }),
@@ -1040,10 +1068,15 @@
               ? h(
                   "div",
                   { className: "ach-muted" },
-                  "截至 " + new Date(value.generatedAt).toLocaleString() +
-                    " · 会话 " + (details.sessions ?? 0) +
+                  "会话 " + (details.sessions ?? 0) +
                     "（冷 " + String(meta.cold ?? "?") + " / 活 " + String(meta.live ?? "?") + "）" +
-                    (lastAt ? " · 状态更新于 " + new Date(lastAt).toLocaleTimeString() : ""),
+                    (agoSec === null ? "" : " · " + agoSec + " 秒前刷新") +
+                    (delta && delta.amount > 0 ? " · 本次 +" + formatTokens(delta.amount) : ""),
+                  h(
+                    "div",
+                    null,
+                    "累计精确值 " + exactTokens(cards.cumulativeTokens) + " · 每 " + Math.round(REFRESH_MS / 1000) + " 秒自动刷新 · 数据时间 " + new Date(value.generatedAt).toLocaleTimeString(),
+                  ),
                 )
               : null,
           ),
