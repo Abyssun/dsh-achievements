@@ -66,6 +66,12 @@ function loadBundle(opts = {}) {
     };
   }
   sandbox.console = { warn: () => {}, error: () => {}, log: () => {} };
+  // vm 沙箱里没有宿主定时器，而 bundle 的 callWithTimeout 依赖它们 —— 不注入的话
+  // 会在 promise executor 里 ReferenceError，导致远程调用根本没发生（测试假阳性）
+  sandbox.setTimeout = setTimeout;
+  sandbox.clearTimeout = clearTimeout;
+  sandbox.setInterval = setInterval;
+  sandbox.clearInterval = clearInterval;
   vm.createContext(sandbox);
   new vm.Script(source, { filename: "client.js" }).runInContext(sandbox);
   return { captured, sandbox };
@@ -75,7 +81,19 @@ function loadBundle(opts = {}) {
 function makeCtx(opts = {}) {
   const registrations = [];
   const effects = [];
+  const accountCalls = [];
   let mounted = null;
+
+  /** 官方账号命名空间替身：记录 getProfile 的入参，回一个 ready 资料。 */
+  const accountNamespace = {
+    getProfile: async (meta) => {
+      accountCalls.push(meta);
+      if (opts.accountFails) return { ok: false, error: { code: "x", message: "boom" } };
+      if (opts.accountSignedOut) return { ok: true, value: null };
+      return { ok: true, value: { status: "ready", value: { id: "1335052546", name: "李雨", contact: null, avatarUrl: "https://example.com/acc.png" } } };
+    },
+  };
+
   const ctx = {
     remote: {
       $mount: async (descriptor) => {
@@ -88,6 +106,8 @@ function makeCtx(opts = {}) {
       if (name === "remote.achievements") {
         return { getMetrics: async () => ({ ok: true, value: null }), setProfile: async () => ({ ok: true, value: {} }) };
       }
+      // 默认**不**直接给账号命名空间，逼着走 ctx.inject 那条路（更贴近真实 inject 语义）
+      if (name === "remote.account" && opts.accountViaGet) return accountNamespace;
       return undefined;
     },
     slots: {
@@ -106,7 +126,17 @@ function makeCtx(opts = {}) {
       return () => {};
     },
   };
-  return { ctx, registrations, effects, getMounted: () => mounted };
+  // 让 ctx.inject 回调拿到一个「有 get() 的 scope」，这样账号那条路能真正跑通
+  const innerInject = ctx.inject;
+  ctx.inject = (deps, cb) => {
+    if (opts.injectThrows) throw new Error("inject boom");
+    if (Array.isArray(deps) && deps.includes("remote.account")) {
+      if (opts.accountUnavailable) return cb({ get: () => undefined });
+      return cb({ get: (n) => (n === "remote.account" ? accountNamespace : undefined) });
+    }
+    return innerInject(deps, cb);
+  };
+  return { ctx, registrations, effects, accountCalls, getMounted: () => mounted };
 }
 
 console.log("=== 1. bundle 注册契约 ===");
@@ -203,6 +233,58 @@ console.log("=== 4. 顶层作用域卫生（防与别的插件撞名 —— 2026
   ok("整个 bundle 包在 IIFE 里（首）", /\(\(\)\s*=>\s*\{/.test(source));
   ok("整个 bundle 包在 IIFE 里（尾）", /\}\)\(\);\s*$/.test(source.trim()));
   ok("顶层不再出现裸标识符 CLIENT_BUNDLE_ID", !/^const CLIENT_BUNDLE_ID/m.test(source));
+}
+
+console.log("=== 5. DSH 账号默认值（昵称/头像）的读取契约 ===");
+{
+  const { captured } = loadBundle();
+  const exports = captured[0].factory(() => fakeReact);
+  const { ctx, accountCalls } = makeCtx({ accountViaGet: true });
+  let rejected = null;
+  await exports.apply(ctx).catch((e) => {
+    rejected = e;
+  });
+  ok("apply() 未 reject", rejected === null, rejected && rejected.message);
+  ok("调用了 remote.account.getProfile", accountCalls.length >= 1, String(accountCalls.length));
+  const meta = accountCalls[0] || {};
+  ok(
+    "★ 传了必填参数 version / locale / timezoneOffsetSeconds",
+    typeof meta.version === "string" && meta.version !== "" &&
+      typeof meta.locale === "string" && meta.locale !== "" &&
+      typeof meta.timezoneOffsetSeconds === "number",
+    JSON.stringify(meta),
+  );
+  ok("时区偏移是秒（本地时区反号）", Math.abs(meta.timezoneOffsetSeconds) <= 86400, String(meta.timezoneOffsetSeconds));
+}
+{
+  // ctx.get 拿不到 → 退到 ctx.inject 那条路（官方命名空间未声明 inject 时的真实情形）
+  const { captured } = loadBundle();
+  const exports = captured[0].factory(() => fakeReact);
+  const { ctx, accountCalls } = makeCtx({});
+  let rejected = null;
+  await exports.apply(ctx).catch((e) => {
+    rejected = e;
+  });
+  ok("ctx.get 拿不到时仍能经 inject 取到账号资料", rejected === null && accountCalls.length >= 1, `calls=${accountCalls.length}`);
+}
+for (const [label, opts] of [
+  ["账号命名空间不可用", { accountUnavailable: true }],
+  ["账号调用失败", { accountFails: true }],
+  ["未登录", { accountSignedOut: true }],
+]) {
+  const { captured } = loadBundle();
+  const exports = captured[0].factory(() => fakeReact);
+  const { ctx, registrations } = makeCtx(opts);
+  let rejected = null;
+  await exports.apply(ctx).catch((e) => {
+    rejected = e;
+  });
+  const names = registrations.map((r) => r.options.name).sort().join(",");
+  ok(
+    `${label} → apply 仍不 reject，三个槽位照常注册`,
+    rejected === null && names === "main,settings.plugins.tab,sidebar.panellist",
+    `${rejected && rejected.message} / ${names}`,
+  );
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);

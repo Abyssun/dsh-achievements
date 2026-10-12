@@ -37,7 +37,8 @@ const identitySchema = z
   .object({
     anonymousUserId: z.union([z.string(), z.null()]),
     nickname: z.union([z.string(), z.null()]),
-    avatarUrl: z.union([z.string(), z.null()]),
+    /** 用户自己设的头像：http(s) URL 或 data:image/...（null 时客户端回退到 DSH 账号头像） */
+    avatar: z.union([z.string(), z.null()]),
   })
   .readonly();
 
@@ -98,18 +99,28 @@ const metaSchema = z
   .object({
     gapMs: z.number(),
     stateVersion: z.number(),
-    listing: z.number(),
-    liveFromRegistry: z.number(),
-    liveFallback: z.number(),
-    coldFromLog: z.number(),
-    failed: z.number(),
     registryAvailable: z.boolean(),
+    listing: z.number(),
+    cold: z.number(),
+    live: z.number(),
+    failed: z.number(),
+    timedOut: z.number(),
+    snapshotMs: z.number(),
+    backfillMs: z.number(),
   })
   .readonly();
 
 const metricsValueSchema = z
   .object({
     ready: z.boolean(),
+    collecting: z.boolean(),
+    progress: z
+      .object({
+        done: z.number(),
+        total: z.number(),
+        failed: z.number(),
+      })
+      .readonly(),
     error: z.union([z.string(), z.null()]),
     generatedAt: z.number(),
     identity: identitySchema,
@@ -134,7 +145,7 @@ const createMetricsResult = () => metricsResultSchema;
 const profileInputSchema = z
   .object({
     nickname: z.union([z.string(), z.null()]).optional(),
-    avatarUrl: z.union([z.string(), z.null()]).optional(),
+    avatar: z.union([z.string(), z.null()]).optional(),
   })
   .readonly();
 
@@ -142,7 +153,7 @@ const profileValueSchema = z
   .object({
     saved: z.boolean(),
     nickname: z.union([z.string(), z.null()]),
-    avatarUrl: z.union([z.string(), z.null()]),
+    avatar: z.union([z.string(), z.null()]),
   })
   .readonly();
 

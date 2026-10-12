@@ -1,36 +1,34 @@
 /**
  * dsh-achievements — Host half.
  *
- * 一个 DSH 正式插件（三件套）的 Host 面：注册 `achievements` 服务，把「个人成就」
- * 需要的跨会话指标聚合出来供浏览器半调用。
+ * 一个 DSH 正式插件（三件套）的 Host 面：注册 `achievements` 服务，
+ * 把「个人成就」需要的跨会话指标聚合出来供浏览器半调用。
  *
- * 数据管线（与 docs/03、docs/05 的设计一致）：
+ * ## 数据管线
  *
  *   ① 官方投影单元（host-only，不带 wire）
  *      `ctx.sessionProjections.register({ key, stateSchema, init, apply, stateVersion })`
- *      —— 框架负责订阅 `session/event`、按会话维护水位线、以及把状态写进
- *      `session_projcache` 持久检查点。**我们不自己实现去重与落盘。**
- *      `init(header, inheritedEventCount)` 直接拿到继承前缀的精确长度：
- *      fork/子会话日志开头那 N 条是父会话的副本，跨会话累加时必须整段跳过，
- *      否则同一笔模型调用会被父子各算一次（详见 docs/05）。
+ *      框架负责订阅 `session/event`、按会话维护水位线、把状态写进 `session_projcache`。
+ *      `init(header, inheritedEventCount)` 直接拿到继承前缀的精确长度 —— fork/子会话日志
+ *      开头那 N 条是父会话的副本，跨会话累加时必须整段跳过（见 docs/05）。
  *
- *   ② 跨会话 rollup（本项目独有，官方没有）
- *      官方的 sessionStats 与投影 seam 都是**按会话**的。累计总量 / 峰值 /
- *      连续天数这类指标只能自己汇总：
- *        - 活会话：`ctx.sessions.list()` 拿到 live Session → `registry.stateOf()`
- *                  （走框架的水位线缓存，增量、便宜）
- *        - 冷会话：`ctx.sessionQuery.readSession(id)` 拿到
- *                  `{ session, inheritedEventCount, events }` → 自己折叠一次并缓存
- *                  （冷日志不会再增长，所以缓存永不失效；一旦它变活就切到 ①）
+ *   ② 跨会话 rollup（官方没有，本项目独有）
+ *      官方的 sessionStats 与投影 seam 都是**按会话**的。
+ *      · 活会话：`ctx.sessions.list()` → `registry.stateOf()`（走框架水位线缓存，增量）
+ *      · 冷会话：**启动时后台回填**一次 `sessionQuery.readSession()` 并缓存
  *
- *   ③ Typert Remote 把结果发给浏览器半（见 typert.host.js，形状必须逐字段对应）。
+ *   ③ Typert Remote 把结果发给浏览器半（见 typert.host.js，形状必须逐字段对应）
  *
- * 契约来源（均为实测，不是推测）：
- *   - `SessionLogSnapshot = { session, inheritedEventCount, events }`
- *     （dsh-session-query/lib/types/types.d.ts:34-41）
- *   - `SessionRecord = { header, live, persisted }`（同文件:14-21）
- *   - `ctx.sessions.list(): Session[]`（dsh-session/lib/types/index.d.ts:26, :424）
- *   - 投影注册表只对 stateSchema 调 `.parse()`（dsh-session-projection/lib/index.js:255,297）
+ * ## ⚠️ 这里曾经有一个致命设计错误（v0.1.3 起修正）
+ *
+ * 早期版本把「列举 + 逐个 readSession + 折叠」全做在 `getMetrics()` 里面。
+ * 95 个会话顺序读取、每个都要解压+校验 → 这个 RPC 几十秒都不返回；而客户端每 30s
+ * 又发起一次、还不等上一次结束，于是请求越堆越多，界面永远停在「刷新中…」、数据全 0。
+ * **请求路径里绝不能做重量级/不确定的 IO。**
+ *
+ * 现在：回填在 `[Service.init]` 里后台跑（并发 4、每会话 8s 超时、失败只记账），
+ * `getMetrics()` **只读内存**、立刻返回，并用 `ready/collecting/progress/error`
+ * 如实上报进度 —— 这样即使没数据，界面也能告诉你卡在哪一步。
  */
 
 import { Remote, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
@@ -49,15 +47,24 @@ const PROJECTION_KEY = "dsh-achievements.ledger";
 /** 投影状态版本：字段形状或折叠语义一变就要 +1，否则旧检查点会被前滚成垃圾。 */
 const PROJECTION_STATE_VERSION = LEDGER_FIELD_VERSION;
 
+/** 单个会话读取的超时：一个坏会话不能拖死整轮回填。可用 DSH_ACH_READ_TIMEOUT_MS 覆盖（测试/调试用）。 */
+const READ_TIMEOUT_MS = Number(process.env.DSH_ACH_READ_TIMEOUT_MS || 8000);
+/** 回填并发。 */
+const BACKFILL_CONCURRENCY = 4;
+/** 回填完成后周期性重扫（只为发现新会话，很便宜）。 */
+const RESCAN_INTERVAL_MS = 60000;
+/** 活会话账本缓存时间，避免每 30s 轮询都重算大日志。 */
+const LIVE_TTL_MS = 5000;
+/** 头像上限：约 512 KB 的 data URL（客户端会先缩到 256×256，正常只有几十 KB）。 */
+const AVATAR_MAX_CHARS = 700000;
+
 const DSH_HOME = process.env.DSH_HOME || join(homedir(), ".dsh");
 const CONFIG_PATH = join(DSH_HOME, "data", "dsh-achievements", "config.json");
 const ANONYMOUS_ID_PATH = join(DSH_HOME, ".anonymous-user-id");
 
 /* ======================================================================
- * 投影单元的 stateSchema
- *
- * 注册表只对这个 schema 调 `.parse()`（冷启动恢复检查点时 / 读快照时各一次），
- * 用来挡住被前滚的坏数据。它必须与 lib/fold.js 的 emptyLedger() 形状严格一致。
+ * 投影单元的 stateSchema（注册表只对它调 .parse()）
+ * 必须与 lib/fold.js 的 emptyLedger() 形状严格一致。
  * ==================================================================== */
 
 const dayRecordSchema = z.object({
@@ -92,10 +99,9 @@ const ledgerSchema = z.object({
 });
 
 /* ======================================================================
- * 小工具
+ * 工具
  * ==================================================================== */
 
-/** 把任意抛出物压成一行可读文本。 */
 function msg(e) {
   if (e === null || e === undefined) return "unknown";
   if (typeof e === "string") return e;
@@ -106,15 +112,29 @@ function num(v) {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
 }
 
+/** 给 promise 套超时；超时以 reject 暴露，便于记账。 */
+function withTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} 超时（${ms}ms）`)), ms);
+    if (timer && typeof timer.unref === "function") timer.unref();
+    Promise.resolve(promise).then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
 /**
  * Mark one instance method as a Remote export without relying on decorator
  * syntax (Node ESM does not support the proposal decorators here). We drive
  * the same `Remote(name)` decorator manually through a synthetic decorator
  * context and run the registered initializers against the instance.
- *
- * @param {object} instance - live service instance whose prototype is marked.
- * @param {string} method - public instance method name.
- * @param {string} [exportName] - wire export name; defaults to the method name.
  */
 function markRemoteMethod(instance, method, exportName) {
   const decorator = Remote(method, undefined);
@@ -129,7 +149,7 @@ function markRemoteMethod(instance, method, exportName) {
   for (const fn of initializers) fn.call(instance);
 }
 
-/** 读 `~/.dsh/.anonymous-user-id`（图一里 `@数字` 的来源）。读不到就是 null。 */
+/** 读 `~/.dsh/.anonymous-user-id`（本机实测是 UUID）。读不到就是 null。 */
 function readAnonymousUserId() {
   try {
     const raw = readFileSync(ANONYMOUS_ID_PATH, "utf8").trim();
@@ -139,32 +159,29 @@ function readAnonymousUserId() {
   }
 }
 
-/** 读插件自己的配置（昵称 / 头像）。缺文件或损坏一律当作空配置。 */
+/** 读插件自己的配置。兼容旧的 `avatarUrl` 字段名。 */
 function readConfig() {
   try {
     const parsed = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
-    if (!parsed || typeof parsed !== "object") return { nickname: null, avatarUrl: null };
+    if (!parsed || typeof parsed !== "object") return { nickname: null, avatar: null };
+    const avatar =
+      typeof parsed.avatar === "string" && parsed.avatar !== ""
+        ? parsed.avatar
+        : typeof parsed.avatarUrl === "string" && parsed.avatarUrl !== ""
+          ? parsed.avatarUrl
+          : null;
     return {
       nickname: typeof parsed.nickname === "string" && parsed.nickname !== "" ? parsed.nickname : null,
-      avatarUrl: typeof parsed.avatarUrl === "string" && parsed.avatarUrl !== "" ? parsed.avatarUrl : null,
+      avatar,
     };
   } catch {
-    return { nickname: null, avatarUrl: null };
+    return { nickname: null, avatar: null };
   }
 }
 
 function writeConfig(next) {
   mkdirSync(dirname(CONFIG_PATH), { recursive: true });
   writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2) + "\n", "utf8");
-}
-
-/** 从 live Session 上取 id；不同版本可能放在 header.id 或 id 上，两个都试。 */
-function idOfSession(session) {
-  const a = session && session.id;
-  if (typeof a === "string" && a !== "") return a;
-  const b = session && session.header && session.header.id;
-  if (typeof b === "string" && b !== "") return b;
-  return null;
 }
 
 /** `"provider::model"` → `{ provider, name }`。 */
@@ -174,15 +191,31 @@ function splitModelKey(key) {
   return { provider: key.slice(0, i), name: key.slice(i + 2) };
 }
 
+/** 校验头像：允许 http(s) URL 或 data:image/(png|jpeg|webp|gif)。 */
+function normalizeAvatar(value) {
+  if (value === null) return { ok: true, value: null };
+  if (typeof value !== "string") return { ok: false, reason: "头像必须是字符串或 null" };
+  const v = value.trim();
+  if (v === "") return { ok: true, value: null };
+  if (/^https?:\/\//i.test(v)) {
+    if (v.length > 2048) return { ok: false, reason: "头像 URL 过长（>2048）" };
+    return { ok: true, value: v };
+  }
+  if (/^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/i.test(v)) {
+    if (v.length > AVATAR_MAX_CHARS) {
+      return { ok: false, reason: `头像图片过大（${v.length} 字符 > ${AVATAR_MAX_CHARS}），请换更小的图` };
+    }
+    return { ok: true, value: v };
+  }
+  return { ok: false, reason: "头像格式不支持（只接受 http(s) URL 或 data:image/png|jpeg|webp|gif）" };
+}
+
 /* ======================================================================
  * 服务
  * ==================================================================== */
 
 export class AchievementsService extends TypertRemoteService {
-  /**
-   * 故意**不声明硬依赖**：`sessionProjections` / `sessionQuery` / `sessions` 全部
-   * 通过 `ctx.get()` / `ctx.inject()` 软取。缺失时降级成空态而不是让整个 profile 起不来。
-   */
+  /** 故意不声明硬依赖：全部通过 ctx.get() / ctx.inject() 软取，缺失时降级。 */
   static inject = [];
 
   constructor(ctx, config) {
@@ -190,22 +223,34 @@ export class AchievementsService extends TypertRemoteService {
   }
 
   /**
-   * Cordis 类插件初始化：构造之后、服务发布之前执行。
-   *
-   * 容错要求（0.1.7 起）：必需插件激活 reject 会让整个 profile 起不来。
-   * 所以**先把内存状态建齐**，后面每一步各自 try/catch，失败只记进 `this._error`，
-   * 服务照常注册应答。
+   * Cordis 类插件初始化：构造之后、服务发布之前。
+   * 先把内存状态建齐，后面每步各自 try/catch —— 0.1.7 起激活 reject 会拖垮整个 profile。
    */
   [Service.init]() {
     // —— 状态先行 ——
     this._error = null;
-    /** 投影单元是否注册成功。 */
     this._registryReady = false;
-    /** 冷会话账本缓存：sessionId -> ledger（冷日志不再增长，故不会失效）。 */
+    this._disposed = false;
+
+    /** 冷会话账本：sessionId -> ledger（后台回填产物，只增量补新会话）。 */
     this._cold = new Map();
-    /** 最近一次 rollup 结果与时间。 */
-    this._last = null;
-    this._lastAt = 0;
+    /** 活会话账本缓存：sessionId -> { ledger, at }。 */
+    this._live = new Map();
+
+    /** 回填进度。 */
+    this._backfill = {
+      startedAt: 0,
+      finishedAt: 0,
+      done: false,
+      total: 0,
+      doneCount: 0,
+      failed: 0,
+      timedOut: 0,
+      error: null,
+    };
+    this._backfillPromise = null;
+    this._rescanTimer = null;
+    this._lastMs = 0;
 
     // —— 逐个可选步骤，互不牵连 ——
     try {
@@ -217,131 +262,54 @@ export class AchievementsService extends TypertRemoteService {
     try {
       markRemoteMethod(this, "setProfile", "setProfile");
     } catch (e) {
-      this._error = "setProfile 未发布: " + msg(e);
+      this._error = (this._error ? this._error + " | " : "") + "setProfile 未发布: " + msg(e);
     }
 
-    // 注册投影单元。`ctx.inject` 让这段注册成为可选项：没有投影注册表的部署
-    // 不会因此挂掉，只是退化成「冷会话自折叠」这一条路径。
     try {
       this.ctx.inject(["sessionProjections"], (scope) => {
         scope.sessionProjections.register({
           key: PROJECTION_KEY,
           stateSchema: ledgerSchema,
           stateVersion: PROJECTION_STATE_VERSION,
-          // 官方把 fork 继承前缀的精确长度交给我们（不是我们自己去解析标记）
           init: (header, inheritedEventCount) => emptyLedger(num(inheritedEventCount)),
-          // 纯折叠；不感兴趣的事件必须返回同一引用（框架靠 Object.is 省下游工作）
           apply: applyLedger,
         });
         this._registryReady = true;
       });
     } catch (e) {
-      this._error = "投影单元注册失败: " + msg(e);
+      this._error = (this._error ? this._error + " | " : "") + "投影单元注册失败: " + msg(e);
     }
 
-    // 新的会话事件只把缓存置脏；真正的重算推迟到下一次 getMetrics。
     try {
-      this.ctx.on("session/event", () => {
-        this._lastAt = 0;
-      });
-    } catch (e) {
-      this._error = (this._error ? this._error + " | " : "") + "session/event 监听未注册: " + msg(e);
-    }
-
-    // fiber 释放时清干净（这里没有定时器，但保留挂钩以便后续加节流写入）
-    try {
-      this.ctx.effect(() => () => {
-        this._cold.clear();
-        this._last = null;
-      }, "dsh-achievements.dispose");
+      this.ctx.effect(
+        () => () => {
+          this._disposed = true;
+          if (this._rescanTimer) {
+            clearInterval(this._rescanTimer);
+            this._rescanTimer = null;
+          }
+          this._cold.clear();
+          this._live.clear();
+        },
+        "dsh-achievements.dispose",
+      );
     } catch (e) {
       this._error = (this._error ? this._error + " | " : "") + "disposer 未注册: " + msg(e);
     }
-  }
 
-  /* ---------------------------------------------------------------- 取数 */
-
-  /**
-   * 收集全部会话的账本。
-   *
-   * 活会话走官方投影（增量、便宜）；冷会话读一次日志自己折叠并缓存。
-   * 这两条路径产出的账本形状完全一致，所以后面的汇总不必区分来源。
-   *
-   * @returns {Promise<{ledgers: object[], stats: object}>}
-   */
-  async _collectLedgers() {
-    const stats = { listing: 0, liveFromRegistry: 0, coldFromLog: 0, liveFallback: 0, failed: 0 };
-
-    const query = this._getService("sessionQuery");
-    if (!query || typeof query.listSessions !== "function") {
-      throw new Error("sessionQuery 服务不可用（无法列举会话）");
-    }
-
-    const records = (await query.listSessions()) || [];
-    stats.listing = records.length;
-
-    // 活会话：id -> live Session
-    const liveById = new Map();
+    // 后台回填：不阻塞、不抛。失败只记账，getMetrics 用 ready/progress/error 上报。
     try {
-      const store = this._getService("sessions");
-      const list = store && typeof store.list === "function" ? store.list() || [] : [];
-      for (const s of list) {
-        const id = idOfSession(s);
-        if (id) liveById.set(id, s);
+      this._backfillPromise = this._backfillAll();
+      if (this._backfillPromise && typeof this._backfillPromise.catch === "function") {
+        this._backfillPromise.catch((e) => {
+          this._backfill.error = "回填异常: " + msg(e);
+          this._backfill.done = true;
+        });
       }
-    } catch {
-      /* 没有 sessions 服务也能跑：活会话退化成冷路径 */
+    } catch (e) {
+      this._backfill.error = "回填启动失败: " + msg(e);
+      this._backfill.done = true;
     }
-
-    const registry = this._registryReady ? this._getService("sessionProjections") : null;
-    const ledgers = [];
-
-    for (const rec of records) {
-      const id = rec && rec.header && rec.header.id;
-      if (typeof id !== "string" || id === "") continue;
-
-      // ① 活会话优先走官方投影
-      if (registry && typeof registry.stateOf === "function") {
-        const live = liveById.get(id);
-        if (live) {
-          try {
-            const led = registry.stateOf(live, PROJECTION_KEY);
-            if (led) {
-              ledgers.push(led);
-              stats.liveFromRegistry += 1;
-              continue;
-            }
-          } catch {
-            /* 落到冷路径 */
-          }
-        }
-      }
-
-      // ② 冷会话：读一次、折一次、缓存住
-      if (!liveById.has(id)) {
-        const cached = this._cold.get(id);
-        if (cached) {
-          ledgers.push(cached);
-          continue;
-        }
-      }
-
-      try {
-        const snap = await query.readSession(id);
-        const events = (snap && snap.events) || [];
-        // 官方直接给出继承前缀长度；没有该字段时退回 0（宁可多算也不错算）
-        const inherited = num(snap && snap.inheritedEventCount);
-        const ledger = foldEvents(events, emptyLedger(inherited));
-        if (!liveById.has(id)) this._cold.set(id, ledger);
-        ledgers.push(ledger);
-        stats.coldFromLog += 1;
-      } catch {
-        // 单个会话读失败不该毁掉整页数字
-        stats.failed += 1;
-      }
-    }
-
-    return { ledgers, stats };
   }
 
   /** 软取一个服务；缺失返回 null 而不是抛。 */
@@ -354,19 +322,188 @@ export class AchievementsService extends TypertRemoteService {
     return null;
   }
 
+  /** 当前活会话 id 集合。 */
+  _liveIdSet() {
+    const ids = new Set();
+    try {
+      const store = this._getService("sessions");
+      const list = store && typeof store.list === "function" ? store.list() || [] : [];
+      for (const s of list) {
+        const id = (s && s.id) || (s && s.header && s.header.id);
+        if (typeof id === "string" && id !== "") ids.add(id);
+      }
+    } catch {
+      /* 没有 sessions 服务也能跑：全部走冷路径 */
+    }
+    return ids;
+  }
+
+  /** 后台回填：把**非活**会话逐个读一遍、折叠、缓存。唯一做重 IO 的地方。 */
+  async _backfillAll() {
+    this._backfill.startedAt = Date.now();
+
+    const query = this._getService("sessionQuery");
+    if (!query || typeof query.listSessions !== "function") {
+      this._backfill.error = "sessionQuery 服务不可用（无法列举会话）";
+      this._backfill.done = true;
+      this._backfill.finishedAt = Date.now();
+      return;
+    }
+
+    let records = [];
+    try {
+      records = (await withTimeout(query.listSessions(), 15000, "listSessions")) || [];
+    } catch (e) {
+      this._backfill.error = "listSessions 失败: " + msg(e);
+      this._backfill.done = true;
+      this._backfill.finishedAt = Date.now();
+      return;
+    }
+
+    await this._foldMissing(records, query);
+
+    this._backfill.done = true;
+    this._backfill.finishedAt = Date.now();
+
+    // 回填完再起周期性重扫：只为发现**新**会话，通常一次几毫秒。
+    try {
+      this._rescanTimer = setInterval(() => {
+        if (this._disposed) return;
+        this._rescan().catch(() => {});
+      }, RESCAN_INTERVAL_MS);
+      if (this._rescanTimer && typeof this._rescanTimer.unref === "function") this._rescanTimer.unref();
+    } catch {
+      /* 定时器不可用也不影响已回填的数据 */
+    }
+  }
+
+  /** 周期性重扫：只补 `_cold` 里还没有、且当前不活的会话。 */
+  async _rescan() {
+    const query = this._getService("sessionQuery");
+    if (!query || typeof query.listSessions !== "function") return;
+    const records = (await withTimeout(query.listSessions(), 15000, "listSessions")) || [];
+    await this._foldMissing(records, query);
+  }
+
+  /**
+   * 对给定列表里「还没折过」的会话做并发折叠。
+   *
+   * 活会话**也折一份**当兜底：快照里对活会话优先用 `stateOf()`（更新），
+   * 并在遍历 `_cold` 时**跳过当前活着的 id**，所以不会重复计。
+   * 这样即使某个活会话的 `stateOf()` 抛错/返回空，也还有数据可显示，而不是整块为 0。
+   */
+  async _foldMissing(records, query) {
+    const pending = [];
+    for (const rec of records) {
+      const id = rec && rec.header && rec.header.id;
+      if (typeof id !== "string" || id === "") continue;
+      if (this._cold.has(id)) continue;
+      pending.push(id);
+    }
+
+    this._backfill.total += pending.length;
+    if (pending.length === 0) return;
+
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < pending.length) {
+        if (this._disposed) return;
+        const id = pending[cursor++];
+        try {
+          const snap = await withTimeout(query.readSession(id), READ_TIMEOUT_MS, `readSession(${id})`);
+          const events = (snap && snap.events) || [];
+          const ledger = foldEvents(events, emptyLedger(num(snap && snap.inheritedEventCount)));
+          this._cold.set(id, ledger);
+        } catch (e) {
+          this._backfill.failed += 1;
+          if (msg(e).includes("超时")) this._backfill.timedOut += 1;
+          if (!this._backfill.error) this._backfill.error = `readSession(${id}) 失败: ` + msg(e);
+        }
+        this._backfill.doneCount += 1;
+      }
+    };
+
+    const workers = Math.max(1, Math.min(BACKFILL_CONCURRENCY, pending.length));
+    await Promise.all(Array.from({ length: workers }, worker));
+  }
+
+  /** 取活会话账本（带 5s 缓存）。失败返回 null，由调用方回退。 */
+  _liveLedger(id, session, registry) {
+    const hit = this._live.get(id);
+    const now = Date.now();
+    if (hit && now - hit.at < LIVE_TTL_MS) return hit.ledger;
+
+    let ledger = null;
+    if (registry && typeof registry.stateOf === "function") {
+      try {
+        ledger = registry.stateOf(session, PROJECTION_KEY) || null;
+      } catch {
+        ledger = null;
+      }
+    }
+    if (ledger) {
+      this._live.set(id, { ledger, at: now });
+      return ledger;
+    }
+    return hit ? hit.ledger : null;
+  }
+
   /** 组织成给客户端看的 wire 值（形状必须与 typert.host.js 的 schema 逐字段一致）。 */
-  _buildValue(ledgers, stats) {
+  _snapshot() {
+    const started = Date.now();
+    const liveIds = this._liveIdSet();
+    const registry = this._registryReady ? this._getService("sessionProjections") : null;
+
+    const ledgers = [];
+    let cold = 0;
+    let live = 0;
+
+    // 冷会话（跳过当前已变活的，避免与 stateOf 重复计）
+    for (const [id, ledger] of this._cold) {
+      if (liveIds.has(id)) continue;
+      ledgers.push(ledger);
+      cold += 1;
+    }
+
+    // 活会话
+    try {
+      const store = this._getService("sessions");
+      const list = store && typeof store.list === "function" ? store.list() || [] : [];
+      for (const s of list) {
+        const id = (s && s.id) || (s && s.header && s.header.id);
+        if (typeof id !== "string" || id === "") continue;
+        const ledger = this._liveLedger(id, s, registry);
+        if (ledger) {
+          ledgers.push(ledger);
+          live += 1;
+        } else if (this._cold.has(id)) {
+          // stateOf 暂时拿不到 → 用回填那份，至少不丢数据
+          ledgers.push(this._cold.get(id));
+          cold += 1;
+        }
+      }
+    } catch {
+      /* 活会话取不到就只报冷会话 */
+    }
+
     const m = computeMetrics(ledgers, Date.now());
     const cfg = readConfig();
+    this._lastMs = Date.now() - started;
 
     return {
-      ready: true,
-      error: this._error,
+      ready: this._backfill.done,
+      collecting: !this._backfill.done,
+      progress: {
+        done: num(this._backfill.doneCount),
+        total: num(this._backfill.total),
+        failed: num(this._backfill.failed),
+      },
+      error: this._backfill.error || this._error,
       generatedAt: Date.now(),
       identity: {
         anonymousUserId: readAnonymousUserId(),
         nickname: cfg.nickname,
-        avatarUrl: cfg.avatarUrl,
+        avatar: cfg.avatar,
       },
       cards: {
         cumulativeTokens: num(m.cumulativeTokens),
@@ -411,12 +548,14 @@ export class AchievementsService extends TypertRemoteService {
       meta: {
         gapMs: TASK_GAP_MS,
         stateVersion: PROJECTION_STATE_VERSION,
-        listing: num(stats.listing),
-        liveFromRegistry: num(stats.liveFromRegistry),
-        liveFallback: num(stats.liveFallback),
-        coldFromLog: num(stats.coldFromLog),
-        failed: num(stats.failed),
         registryAvailable: this._registryReady,
+        listing: num(liveIds.size + this._cold.size),
+        cold: num(cold),
+        live: num(live),
+        failed: num(this._backfill.failed),
+        timedOut: num(this._backfill.timedOut),
+        snapshotMs: num(this._lastMs),
+        backfillMs: num((this._backfill.finishedAt || Date.now()) - (this._backfill.startedAt || Date.now())),
       },
     };
   }
@@ -424,46 +563,47 @@ export class AchievementsService extends TypertRemoteService {
   /* ------------------------------------------------------------ Remote */
 
   /**
-   * 全量指标快照（图一 5 张卡片 + 图二详细指标 + 热力图/模型明细）。
-   * 内部任何失败都转成业务失败信封，绝不抛到网关上。
-   *
+   * 指标快照。**只读内存**，立刻返回 —— 重量级 IO 全在后台回填里。
    * @returns {Promise<{ok: true, value: object} | {ok: false, error: {code: string, message: string}}>}
    */
   async getMetrics() {
     try {
-      const { ledgers, stats } = await this._collectLedgers();
-      return { ok: true, value: this._buildValue(ledgers, stats) };
+      return { ok: true, value: this._snapshot() };
     } catch (e) {
       return { ok: false, error: { code: "achievements_unavailable", message: msg(e) } };
     }
   }
 
   /**
-   * 保存个人资料（昵称 / 头像 URL），落到 `<DSH_HOME>/data/dsh-achievements/config.json`。
+   * 保存个人资料（昵称 / 头像），落到 `<DSH_HOME>/data/dsh-achievements/config.json`。
+   * 头像可以是 http(s) URL，也可以是客户端裁好的 `data:image/...;base64,...`。
    *
-   * @param {{nickname?: string|null, avatarUrl?: string|null}} input
-   * @returns {Promise<{ok: true, value: {saved: boolean, nickname: string|null, avatarUrl: string|null}} | {ok: false, error: {code: string, message: string}}>}
+   * @param {{nickname?: string|null, avatar?: string|null}} input
+   * @returns {Promise<{ok: true, value: {saved: boolean, nickname: string|null, avatar: string|null}} | {ok: false, error: {code: string, message: string}}>}
    */
   async setProfile(input) {
     try {
       const patch = input && typeof input === "object" ? input : {};
       const current = readConfig();
-      const next = {
-        nickname:
-          typeof patch.nickname === "string" && patch.nickname.trim() !== ""
-            ? patch.nickname.trim()
-            : patch.nickname === null
-              ? null
-              : current.nickname,
-        avatarUrl:
-          typeof patch.avatarUrl === "string" && patch.avatarUrl.trim() !== ""
-            ? patch.avatarUrl.trim()
-            : patch.avatarUrl === null
-              ? null
-              : current.avatarUrl,
-      };
-      writeConfig(next);
-      return { ok: true, value: { saved: true, nickname: next.nickname, avatarUrl: next.avatarUrl } };
+
+      let nickname = current.nickname;
+      if (Object.prototype.hasOwnProperty.call(patch, "nickname")) {
+        if (patch.nickname === null) nickname = null;
+        else if (typeof patch.nickname === "string") {
+          const t = patch.nickname.trim();
+          nickname = t === "" ? null : t.slice(0, 64);
+        }
+      }
+
+      let avatar = current.avatar;
+      if (Object.prototype.hasOwnProperty.call(patch, "avatar")) {
+        const norm = normalizeAvatar(patch.avatar);
+        if (!norm.ok) return { ok: false, error: { code: "avatar_invalid", message: norm.reason } };
+        avatar = norm.value;
+      }
+
+      writeConfig({ nickname, avatar });
+      return { ok: true, value: { saved: true, nickname, avatar } };
     } catch (e) {
       return { ok: false, error: { code: "profile_write_failed", message: msg(e) } };
     }
