@@ -55,6 +55,8 @@ const BACKFILL_CONCURRENCY = 4;
 const RESCAN_INTERVAL_MS = 60000;
 /** 活会话账本缓存时间，避免每 30s 轮询都重算大日志。 */
 const LIVE_TTL_MS = 5000;
+/** 等依赖服务到位的兜底上限。 */
+const SERVICE_WAIT_MS = 5000;
 /** 头像上限：约 512 KB 的 data URL（客户端会先缩到 256×256，正常只有几十 KB）。 */
 const AVATAR_MAX_CHARS = 700000;
 
@@ -154,6 +156,27 @@ function markRemoteMethod(instance, method, exportName) {
     addInitializer: (fn) => initializers.push(fn),
   });
   for (const fn of initializers) fn.call(instance);
+}
+
+/**
+ * 从一个 `ctx.inject(deps, scope => …)` 的回调 scope 里取服务。
+ * 优先 `scope.get()`；有些 cordis 版本直接把服务挂在 scope 上，所以也认属性。
+ */
+function resolveService(scope, name) {
+  if (!scope) return null;
+  try {
+    if (typeof scope.get === "function") {
+      const viaGet = scope.get(name);
+      if (viaGet) return viaGet;
+    }
+  } catch {
+    /* 继续尝试属性访问 */
+  }
+  try {
+    return scope[name] || null;
+  } catch {
+    return null;
+  }
 }
 
 /** 读 `~/.dsh/.anonymous-user-id`（本机实测是 UUID）。读不到就是 null。 */
@@ -258,6 +281,12 @@ export class AchievementsService extends TypertRemoteService {
     this._backfillPromise = null;
     this._rescanTimer = null;
     this._lastMs = 0;
+    /** 会话查询服务：**必须靠 ctx.inject 拿**（见下方注释） */
+    this._query = null;
+    /** 活会话列表服务 */
+    this._sessions = null;
+    /** 等待服务到位期间的兜底定时器 */
+    this._waitTimer = null;
 
     // —— 逐个可选步骤，互不牵连 ——
     try {
@@ -295,6 +324,10 @@ export class AchievementsService extends TypertRemoteService {
             clearInterval(this._rescanTimer);
             this._rescanTimer = null;
           }
+          if (this._waitTimer) {
+            clearTimeout(this._waitTimer);
+            this._waitTimer = null;
+          }
           this._cold.clear();
           this._live.clear();
         },
@@ -304,18 +337,42 @@ export class AchievementsService extends TypertRemoteService {
       this._error = (this._error ? this._error + " | " : "") + "disposer 未注册: " + msg(e);
     }
 
-    // 后台回填：不阻塞、不抛。失败只记账，getMetrics 用 ready/progress/error 上报。
+    // ⚠️ 关键（踩过的坑）：`ctx.get("sessionQuery")` 在 [Service.init] 阶段**拿不到**。
+    //    插件按顺序加载，`@deepseek-ai/dsh-session-query` 提供服务比我们晚，
+    //    而 `ctx.get()` **不会等待**服务出现 —— 于是回填直接报
+    //    「sessionQuery 服务不可用」，diagnostics 表现为 listing=1 / cold=0：
+    //    只有当前活会话有数据，历史会话一个都没统计到。
+    //    `sessions`（由更早加载的 dsh-session 提供）能拿到，差异就来自加载顺序。
+    //    `sessionProjections` 一直好用，正因为它是用 ctx.inject 拿的。
     try {
-      this._backfillPromise = this._backfillAll();
-      if (this._backfillPromise && typeof this._backfillPromise.catch === "function") {
-        this._backfillPromise.catch((e) => {
-          this._backfill.error = "回填异常: " + msg(e);
-          this._backfill.done = true;
-        });
-      }
+      this.ctx.inject(["sessionQuery"], (scope) => {
+        this._query = resolveService(scope, "sessionQuery");
+        this._startBackfill();
+      });
     } catch (e) {
-      this._backfill.error = "回填启动失败: " + msg(e);
+      this._backfill.error = "sessionQuery 依赖注入失败: " + msg(e);
       this._backfill.done = true;
+    }
+
+    // 活会话列表也 inject 一份（dsh-session 通常比我们早，ctx.get 往往也拿得到，双保险）
+    try {
+      this.ctx.inject(["sessions"], (scope) => {
+        this._sessions = resolveService(scope, "sessions");
+      });
+    } catch {
+      /* 拿不到就退化到 ctx.get */
+    }
+
+    // 兜底：万一 sessionQuery 始终没出现，别让界面永远停在「正在后台扫描…」
+    try {
+      this._waitTimer = setTimeout(() => {
+        if (this._backfillPromise) return;
+        this._backfill.error = "等待 sessionQuery 服务超时（" + SERVICE_WAIT_MS + "ms）：无法列举历史会话";
+        this._backfill.done = true;
+      }, SERVICE_WAIT_MS);
+      if (this._waitTimer && typeof this._waitTimer.unref === "function") this._waitTimer.unref();
+    } catch {
+      /* 定时器不可用不影响主流程 */
     }
   }
 
@@ -333,7 +390,7 @@ export class AchievementsService extends TypertRemoteService {
   _liveIdSet() {
     const ids = new Set();
     try {
-      const store = this._getService("sessions");
+      const store = this._sessions || this._getService("sessions");
       const list = store && typeof store.list === "function" ? store.list() || [] : [];
       for (const s of list) {
         const id = (s && s.id) || (s && s.header && s.header.id);
@@ -345,11 +402,38 @@ export class AchievementsService extends TypertRemoteService {
     return ids;
   }
 
-  /** 后台回填：把**非活**会话逐个读一遍、折叠、缓存。唯一做重 IO 的地方。 */
+  /**
+   * 启动后台回填。幂等：依赖注入回调可能触发多次，已经在跑就直接返回。
+   * 这是**唯一**做重 IO 的地方，而且它在请求路径之外。
+   */
+  _startBackfill() {
+    if (this._disposed) return;
+    if (this._backfillPromise) return;
+    if (this._waitTimer) {
+      clearTimeout(this._waitTimer);
+      this._waitTimer = null;
+    }
+    this._backfill.done = false;
+    this._backfill.error = null;
+    try {
+      this._backfillPromise = this._backfillAll();
+      if (this._backfillPromise && typeof this._backfillPromise.catch === "function") {
+        this._backfillPromise.catch((e) => {
+          this._backfill.error = "回填异常: " + msg(e);
+          this._backfill.done = true;
+        });
+      }
+    } catch (e) {
+      this._backfill.error = "回填启动失败: " + msg(e);
+      this._backfill.done = true;
+    }
+  }
+
+  /** 后台回填：把会话逐个读一遍、折叠、缓存。唯一做重 IO 的地方。 */
   async _backfillAll() {
     this._backfill.startedAt = Date.now();
 
-    const query = this._getService("sessionQuery");
+    const query = this._query || this._getService("sessionQuery");
     if (!query || typeof query.listSessions !== "function") {
       this._backfill.error = "sessionQuery 服务不可用（无法列举会话）";
       this._backfill.done = true;
@@ -386,7 +470,7 @@ export class AchievementsService extends TypertRemoteService {
 
   /** 周期性重扫：只补 `_cold` 里还没有、且当前不活的会话。 */
   async _rescan() {
-    const query = this._getService("sessionQuery");
+    const query = this._query || this._getService("sessionQuery");
     if (!query || typeof query.listSessions !== "function") return;
     const records = (await withTimeout(query.listSessions(), 15000, "listSessions")) || [];
     await this._foldMissing(records, query);
@@ -477,7 +561,7 @@ export class AchievementsService extends TypertRemoteService {
 
     // 活会话
     try {
-      const store = this._getService("sessions");
+      const store = this._sessions || this._getService("sessions");
       const list = store && typeof store.list === "function" ? store.list() || [] : [];
       for (const s of list) {
         const id = (s && s.id) || (s && s.header && s.header.id);
@@ -562,6 +646,8 @@ export class AchievementsService extends TypertRemoteService {
         gapMs: TASK_GAP_MS,
         stateVersion: PROJECTION_STATE_VERSION,
         registryAvailable: this._registryReady,
+        /** sessionQuery 是否已到位（拿不到就说明注入没成功，历史会话统计不到） */
+        queryAvailable: this._query !== null,
         listing: num(liveIds.size + this._cold.size),
         cold: num(cold),
         live: num(live),

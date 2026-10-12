@@ -39,7 +39,7 @@ async function importSemver() {
 
 const semver = await importSemver();
 if (semver === undefined) {
-  console.error("smoke:compat — 无法解析 semver（junction 部署的 node_modules，或设 DSH_NODE_MODULES）。");
+  console.error("smoke:compat — 无法解析 semver（把它装到 ./node_modules，或用 DSH_NODE_MODULES 指向部署的 node_modules）。");
   process.exit(1);
 }
 

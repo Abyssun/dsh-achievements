@@ -11,8 +11,8 @@
  *
  * ⚠️ 每个 `mode: "strict"` 的 codec **必须带 `create()` 工厂**：
  *   typert-loader 的 requireStrictCodec 会强制 `typeSymbol` 非空 +
- *   `typeof create === "function"`，缺一个**整个 manifest 拒载**（参考实现
- *   v1.5.0 / v1.5.2 各栽过一次）。改完必须跑 `npm run smoke:typert`。
+ *   `typeof create === "function"`，缺一个**整个 manifest 拒载**。
+ *   改完必须跑 `npm run smoke:typert`。
  *
  * ⚠️ result schema 是 strict 的：`index.js` 的返回值必须与这里**逐字段对应**
  *   （字段不缺席、类型正确），否则网关校验失败。改返回值就要同步改这里。
@@ -100,6 +100,7 @@ const metaSchema = z
     gapMs: z.number(),
     stateVersion: z.number(),
     registryAvailable: z.boolean(),
+    queryAvailable: z.boolean(),
     listing: z.number(),
     cold: z.number(),
     live: z.number(),

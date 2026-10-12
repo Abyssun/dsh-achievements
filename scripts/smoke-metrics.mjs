@@ -67,7 +67,7 @@ function assistantMessage(seq, time, opts = {}) {
 }
 
 /** 会话头（无 seq、无 time）—— 真实日志的第一行。 */
-const SESSION_HEADER = { type: 'session', version: 0, id: 's1', createdAt: 1, cwd: 'F:\\x', origin: 'cli' };
+const SESSION_HEADER = { type: 'session', version: 0, id: 's1', createdAt: 1, cwd: 'C:\\workspace', origin: 'cli' };
 /** 流式块（无 seq）—— 真实日志里大量存在，必须被忽略。 */
 const CHUNK = { type: 'reasoning-chunks', data: { chunks: [] } };
 

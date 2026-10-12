@@ -217,7 +217,7 @@ for (const scenario of [
   ok(`${scenario.label} → apply() 仍不 reject`, rejected === null, rejected && rejected.message);
 }
 
-console.log("=== 4. 顶层作用域卫生（防与别的插件撞名 —— 2026-10-11 事故的回归测试） ===");
+console.log("=== 4. 顶层作用域卫生（防与别的插件撞名 —— 踩过的坑的回归测试） ===");
 {
   // DSH 把多个插件的 client.js 放进**同一个脚本作用域**。顶层 const/let/class 会落进
   // 同一个全局词法作用域，两个插件用同名就是 SyntaxError，整个 client combo 全灭。

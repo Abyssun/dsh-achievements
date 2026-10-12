@@ -21,7 +21,14 @@
   表现：**5 张卡片全 0、`截至 Invalid Date`、诊断全是 `?`、不报任何错**。
   现在 host 直接返回原始值、失败 `throw`，schema 也改回裸值；
   并加了**反证测试**：把信封喂给 schema 必须失败。
-- 个人主页头像/昵称/按钮**居中**（补回漏掉的 `.ach-head` 容器）。
+- **历史会话统计不到（只有当前会话有数据）**。`ctx.get("sessionQuery")` 在
+  `[Service.init]` 阶段**拿不到**这个服务：插件按顺序加载，
+  `@deepseek-ai/dsh-session-query` 提供服务比本插件晚，而 `ctx.get()` 不等待服务出现。
+  表现为界面能出数、但只有当前活会话那一份（诊断里 `cold=0`）。
+  改为用 `ctx.inject(["sessionQuery"], …)` 等依赖到位再启动回填
+  （投影注册表一直好用，正因为它走的就是 inject），并加 5s 兜底避免界面永远显示「扫描中」；
+  诊断新增 `query=` 字段如实上报。
+- 个人主页头像/昵称/按钮**居中**（补回漏掉的容器）。
 - **不再显示本机匿名 UUID**。之前把 `~/.dsh/.anonymous-user-id`（一个 UUID）
   当用户 ID 摆在主页上，容易被误认成账号 ID；现在只有拿到账号 `id`/`contact`
   才显示那一行，匿名 id 挪到设置页并标注「仅本地」。
@@ -74,7 +81,8 @@
   DSH 会把多个插件的 `client.js` 放进**同一个脚本作用域**，顶层 `const` 撞名就是
   `SyntaxError: Identifier 'X' has already been declared`，整个 client 批次全灭，
   表现为 `web boot: 1 entry did not activate: <插件>: import failed`。
-  当时与 `dsh-token-stats` 的 `CLIENT_BUNDLE_ID` 撞名，双方一起把应用打挂。
+  当时另一个已装插件的 `client.js` 也在顶层声明了同名常量（它只是恰好当时是唯一使用者），
+  两边一起把整个 client 批次打挂。
 - 放宽 `@deepseek-ai/dsh-typert-protocol` peer 范围到
   `^0.1.5-rc.2 || ^0.2.0-rc.1`，通过 DSH 0.2.0 起的兼容门校验。
 

@@ -3,10 +3,10 @@
 # 设计取舍都是踩过的坑，别"顺手优化"掉：
 #  1. **不开 `cache: npm`**：本仓库没有 lockfile，setup-node 开 cache 会直接失败。
 #  2. **pack 作业不装任何依赖**：本包的 peerDependencies 与 npm 的自动 peer 解析会打架
-#     （ERESOLVE）—— 参考实现在 v1.5.0 因此翻过车。`npm pack` 本来就不需要依赖。
+#     （ERESOLVE）。`npm pack` 本来就不需要依赖。
 #  3. **产物名从 package.json 的版本算**，不要用 `${GITHUB_REF_NAME#v}` 拼：
 #     npm pack 的产物名用 semver（不带 v），而 ref_name 带 v；拼错会让 Release 里的
-#     安装链接 404（参考实现的 release 正文就这么错过）。
+#     安装链接 404。
 #  4. npm 发布走 **OIDC Trusted Publishing**（`id-token: write`，无需静态 token）。
 #     注意**故意不写 `registry-url`**：setup-node 会往 .npmrc 塞 `${NODE_AUTH_TOKEN}` 占位，
 #     而 OIDC 场景下这个变量是空的，npm 会报 "Failed to replace env in config"。

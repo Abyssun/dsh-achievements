@@ -1,7 +1,7 @@
 /**
  * Host 半冒烟：不需要 DSH 就能验的那些「语法合法但契约错」。
  *
- * 覆盖三类最贵的事故：
+ * 覆盖三类最容易犯、代价最高的错误：
  *
  *  1. ★★ **Remote 方法的返回值形状**。`result.schema` 描述的是**方法的原始返回值**，
  *     `{ok, value}` 信封由传输层加（权威依据：官方 `dsh-api-account-controller`
@@ -116,18 +116,35 @@ function makeCtx(opts = {}) {
         };
 
   const liveSessions = opts.liveSessions || [];
+  const sessionsService = { list: () => liveSessions };
 
   const ctx = {
     reflect: { provide: () => {} },
     get: (name) => {
-      if (name === "sessionQuery") return sessionQuery;
+      // ★ 刻意让 ctx.get("sessionQuery") 返回 null：真实环境里
+      //   dsh-session-query 比我们晚加载，init 阶段 ctx.get 就是拿不到它
+      //   （踩过的坑：diagnostics 显示 listing=1 / cold=0）。
+      //   如果实现退回用 ctx.get，下面所有回填断言都会失败。
+      if (name === "sessionQuery") return null;
       if (name === "sessionProjections") return registry;
-      if (name === "sessions") return { list: () => liveSessions };
+      if (name === "sessions") return sessionsService;
       return null;
     },
     inject: (deps, cb) => {
       if (opts.injectThrows) throw new Error("inject boom");
-      return cb({ sessionProjections: registry, get: () => null });
+      const available = opts.withSessionQuery !== false;
+      const scope = {
+        sessionProjections: registry,
+        sessionQuery: available ? sessionQuery : null,
+        sessions: sessionsService,
+        get: (n) => {
+          if (n === "sessionQuery") return available ? sessionQuery : null;
+          if (n === "sessionProjections") return registry;
+          if (n === "sessions") return sessionsService;
+          return null;
+        },
+      };
+      return cb(scope);
     },
     on: (name, fn) => {
       if (opts.onThrows) throw new Error("on boom");
@@ -147,7 +164,7 @@ function svc(opts) {
   const { ctx, state } = makeCtx(opts);
   const s = new AchievementsService(ctx, {});
   s[Service.init]();
-  return { s, state };
+  return { s, state, ctx };
 }
 
 /** 等回填结束（或超时）。 */
@@ -237,16 +254,18 @@ console.log("=== 3. getMetrics 必须在请求路径里不 await 任何 IO ===")
 
 console.log("=== 4. 回填完成后：数字 ===");
 {
-  const { s, state } = svc({
+  const { s, state, ctx } = svc({
     snapshots: {
       "session-a": { session: { id: "session-a" }, inheritedEventCount: 0, events: [am(1, T0, 1000), am(2, T0 + 10 * MIN, 500)] },
       "session-b": { session: { id: "session-b" }, inheritedEventCount: 0, events: [am(1, T0, 250, FLASH)] },
     },
   });
   await settle(s);
-  ok("readSession 两个会话都读到了", state.readSessionCalls.length === 2, JSON.stringify(state.readSessionCalls));
+  ok("★ ctx.get('sessionQuery') 拿不到（这就是真实加载顺序）", ctx.get("sessionQuery") === null);
+  ok("★ 但回填仍读到全部历史会话（证明走的是 ctx.inject）", state.readSessionCalls.length === 2, JSON.stringify(state.readSessionCalls));
 
   const res = await s.getMetrics("");
+  ok("meta.queryAvailable=true", res.meta.queryAvailable === true, JSON.stringify(res.meta));
   ok("ready=true", res.ready === true);
   ok("collecting=false", res.collecting === false);
   ok("累计 Token 数 = 1750", res.cards.cumulativeTokens === 1750, String(res.cards.cumulativeTokens));

@@ -9,7 +9,7 @@
  *   2. `sidebar.panellist`（list 槽位）—— 左栏图标，**id 必须等于 main 的 key**
  *   3. `settings.plugins.tab` —— 昵称/头像配置页
  *
- * ## 硬约束（都有事故记录，别改）
+ * ## 硬约束（都有踩坑记录，别改）
  *
  *   - **整个 bundle 必须包在 IIFE 里**，顶层不能留任何 `const`/`let`/`function`。
  *     DSH 把多个插件的 client.js 放进**同一个脚本作用域**（合并资源
@@ -17,8 +17,8 @@
  *     全局词法作用域，两个插件用同一个名字就是
  *     `SyntaxError: Identifier 'X' has already been declared` —— 整个 client combo 全灭，
  *     界面只报 "web boot: 1 entry did not activate: <某插件>: import failed"。
- *     ⚠️ 2026-10-11 实际事故：`dsh-token-stats/client.js` 顶层也声明了 `CLIENT_BUNDLE_ID`，
- *     我们照抄那个写法，双方一起把应用打挂（`scripts/smoke-client.mjs` 会守住这条）。
+ *     ⚠️ 这条真出过事：本插件最初把 `CLIENT_BUNDLE_ID` 放在顶层，与另一个已装插件
+ *     的同名顶层常量撞车，双方一起把应用打挂（`scripts/smoke-client.mjs` 会守住这条）。
  *   - bundle id 必须与 `__ModuleLoader__.load` 的 id 完全一致；它同时是 HMR 的样式归属
  *     id（`data-plugin`）。
  *   - `remote.achievements` 必须**自挂载**（`ctx.remote.$mount`）；官方 `dsh-api-remotes`
@@ -916,7 +916,7 @@
                   h(
                     "div",
                     { className: "ach-diag" },
-                    "diagnostics: registry=" + String(meta.registryAvailable) + " listing=" + String(meta.listing ?? "?") +
+                    "diagnostics: registry=" + String(meta.registryAvailable) + " query=" + String(meta.queryAvailable) + " listing=" + String(meta.listing ?? "?") +
                       " cold=" + String(meta.cold ?? "?") + " live=" + String(meta.live ?? "?") +
                       " failed=" + String(meta.failed ?? "?") + " timedOut=" + String(meta.timedOut ?? "?") +
                       " snapshotMs=" + String(meta.snapshotMs ?? "?"),

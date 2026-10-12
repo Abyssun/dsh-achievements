@@ -3,11 +3,10 @@
  * `validateTypertManifest` —— DSH 宿主加载本包 `./typert` 时跑的就是这个函数）。
  *
  * `npm run check` 只查语法，抓不住契约漂移：例如 strict codec 缺 `create()`
- * 工厂会让**整个 manifest 拒载**（参考实现 v1.5.0 / v1.5.2 各栽过一次），
- * 表现为所有 Remote 调用全灭，而语法完全合法。
+ * 工厂会让**整个 manifest 拒载**，表现为所有 Remote 调用全灭，而语法完全合法。
  *
  * 解析 loader 的顺序：
- *   1. 裸 import（workspace 里有 node_modules/@deepseek-ai junction 时可用）
+ *   1. 裸 import（./node_modules 里已有 @deepseek-ai 时可用）
  *   2. DSH_NODE_MODULES=<部署的 node_modules>
  *   3. ./node_modules/@deepseek-ai/dsh-typert-loader/lib/index.js
  */
@@ -37,7 +36,7 @@ async function importLoader() {
 const loader = await importLoader();
 if (loader === undefined) {
   console.error("smoke:typert — 无法解析 @deepseek-ai/dsh-typert-loader。");
-  console.error("请把部署的 @deepseek-ai/* 与 zod junction 进 ./node_modules，");
+  console.error("请把部署的 @deepseek-ai/* 与 zod 放进 ./node_modules，");
   console.error("或设置 DSH_NODE_MODULES 指向部署的 node_modules。");
   process.exit(1);
 }
