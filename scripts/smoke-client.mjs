@@ -287,5 +287,55 @@ for (const [label, opts] of [
   );
 }
 
+console.log("=== 6. 热力图网格（纯计算，离线可断言） ===");
+{
+  const { captured } = loadBundle();
+  const exports = captured[0].factory(() => fakeReact);
+  const t = exports.__test;
+  ok("bundle 暴露了 __test（便于离线断言纯计算）", !!t && typeof t.heatmapGrid === "function");
+
+  const today = new Date(2026, 9, 13); // 2026-10-13
+  const todayKey = t.ymd(today);
+  ok("ymd 输出本地日历日", todayKey === "2026-10-13", todayKey);
+
+  const empty = t.heatmapGrid({}, { weeks: 53, today });
+  ok("53 周 = 371 格减去本周未来几天", empty.cells.length > 360 && empty.cells.length <= 371, String(empty.cells.length));
+  ok("第一列从周一开始", (empty.firstCol.getDay() + 6) % 7 === 0, String(empty.firstCol.getDay()));
+  ok("没有未来日期", empty.cells.every((c) => c.k <= todayKey));
+  ok("最后一格是今天", empty.cells[empty.cells.length - 1].k === todayKey, empty.cells[empty.cells.length - 1].k);
+  ok("空数据：active / max 都是 0", empty.active === 0 && empty.max === 0);
+  ok("空数据：所有格子 level=0", empty.cells.every((c) => c.level === 0));
+
+  const byDate = { "2026-10-13": 100, "2026-10-12": 50, "2026-10-06": 80, "2026-09-30": 25 };
+  const grid = t.heatmapGrid(byDate, { weeks: 53, today });
+  const cellOf = (k) => grid.cells.find((c) => c.k === k);
+  ok("max = 100", grid.max === 100, String(grid.max));
+  ok("active = 4", grid.active === 4, String(grid.active));
+  ok("最大值那天是最深一档（level 4）", cellOf("2026-10-13")?.level === 4, JSON.stringify(cellOf("2026-10-13")));
+  ok("50% 那天 level 2", cellOf("2026-10-12")?.level === 2, String(cellOf("2026-10-12")?.level));
+  ok("80% 那天 level 4", cellOf("2026-10-06")?.level === 4, String(cellOf("2026-10-06")?.level));
+  ok("25% 那天 level 1", cellOf("2026-09-30")?.level === 1, String(cellOf("2026-09-30")?.level));
+  ok(
+    "相隔 7 天 → 同一行、相邻列",
+    cellOf("2026-10-06")?.r === cellOf("2026-10-13")?.r && cellOf("2026-10-06")?.w === cellOf("2026-10-13")?.w - 1,
+    JSON.stringify([cellOf("2026-10-06"), cellOf("2026-10-13")]),
+  );
+  ok("跨月 → 列递增", cellOf("2026-09-30")?.w < cellOf("2026-10-06")?.w, `${cellOf("2026-09-30")?.w} < ${cellOf("2026-10-06")?.w}`);
+  ok(
+    "格子 x/y 与 (列, 行) 一致",
+    cellOf("2026-10-13")?.x === grid.padLeft + cellOf("2026-10-13")?.w * grid.pitch,
+    JSON.stringify(cellOf("2026-10-13")),
+  );
+
+  const levels = [0, 25, 26, 50, 51, 75, 76, 100].map((v) => t.heatLevel(v, 100)).join(",");
+  ok("heatLevel 档位边界正确", levels === "0,1,2,2,3,3,4,4", levels);
+  ok("max=0 不会除零（全部 0 档）", t.heatLevel(5, 0) === 0 && t.heatLevel(0, 0) === 0);
+
+  const narrow = t.heatmapGrid({}, { weeks: 13, today });
+  ok("weeks 参数生效（13 周 ≈ 91 格）", narrow.cells.length > 85 && narrow.cells.length <= 91, String(narrow.cells.length));
+  ok("周数变了宽度跟着变", narrow.width < empty.width, `${narrow.width} vs ${empty.width}`);
+  ok("高度恒为 7 行", narrow.height === empty.height, `${narrow.height} vs ${empty.height}`);
+}
+
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail === 0 ? 0 : 1);

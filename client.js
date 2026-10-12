@@ -112,8 +112,12 @@
 }
 .ach-placeholder svg { color: var(--ach-fg-dim); opacity: .55; }
 .ach-placeholder-text { font-size: 13px; color: var(--ach-fg-dim); }
-.ach-chart { border: 1px solid var(--ach-border); border-radius: 14px; padding: 16px 16px 8px; background: var(--ach-bg-1); }
-.ach-chart svg { display: block; width: 100%; }
+.ach-heat { border: 1px solid var(--ach-border); border-radius: 14px; padding: 14px 16px 10px; background: var(--ach-bg-1); }
+.ach-heat svg { display: block; width: 100%; }
+.ach-heat-label { font-size: 9px; fill: var(--ach-fg-dim); }
+.ach-heat-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 11px; color: var(--ach-fg-dim); padding-top: 6px; flex-wrap: wrap; }
+.ach-heat-legend { display: inline-flex; align-items: center; gap: 4px; }
+.ach-heat-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
 .ach-chart-foot { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--ach-fg-dim); padding: 6px 2px 8px; font-variant-numeric: tabular-nums; flex-wrap: wrap; }
 .ach-notice { margin-top: 24px; padding: 14px 16px; border-radius: 12px; border: 1px solid var(--ach-border); background: var(--ach-bg-2); font-size: 13px; color: var(--ach-fg-dim); line-height: 1.6; }
 .ach-notice code { font-size: 12px; }
@@ -470,52 +474,168 @@
         );
       }
 
-      /** 最近 `dayCount` 个本地日历日的用量柱状图（手写 SVG，零图表库）。 */
-      function ActivityChart(props) {
-        const byDate = props.byDate || {};
-        const dayCount = props.dayCount || 30;
-        const series = [];
-        const now = new Date();
-        for (let i = dayCount - 1; i >= 0; i -= 1) {
-          const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
-          const p = (n) => String(n).padStart(2, "0");
-          const key = d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
-          series.push({ date: key, total: typeof byDate[key] === "number" ? byDate[key] : 0 });
-        }
-        const max = series.reduce((acc, s) => (s.total > acc ? s.total : acc), 0);
-        const width = 600;
-        const height = 120;
-        const gap = 2;
-        const barW = (width - gap * (series.length - 1)) / series.length;
+      /** Date → 'YYYY-MM-DD'（本地日历日，与宿主的 dayKeyOf 口径一致）。 */
+      function ymd(d) {
+        const p = (n) => String(n).padStart(2, "0");
+        return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+      }
 
-        const children = series
-          .map((s, i) => {
-            const ratio = max > 0 ? s.total / max : 0;
-            const barH = Math.max(s.total > 0 ? 2 : 0, Math.round(ratio * (height - 8)));
-            const x = i * (barW + gap);
-            return h("rect", {
-              key: s.date,
-              x: Number(x.toFixed(2)),
-              y: height - barH,
-              width: Number(barW.toFixed(2)),
-              height: barH,
-              rx: 1.5,
-              fill: "var(--ach-accent)",
-              opacity: s.total > 0 ? 0.35 + 0.65 * ratio : 0,
-            });
-          })
-          .concat([h("line", { key: "__base", x1: 0, y1: height, x2: width, y2: height, stroke: "var(--ach-border)", strokeWidth: 1 })]);
+      /** 热力图几何常量（纯计算，便于离线断言）。 */
+      const HEAT_CELL = 10;
+      const HEAT_GAP = 3;
+      /** 0=无消耗，1..4 由浅到深。 */
+      const HEAT_OPACITY = [1, 0.22, 0.45, 0.7, 1];
+
+      /** 按当日总量相对最大值分 4 档（GitHub 的做法）。 */
+      function heatLevel(total, max) {
+        if (!(total > 0) || !(max > 0)) return 0;
+        const ratio = total / max;
+        if (ratio <= 0.25) return 1;
+        if (ratio <= 0.5) return 2;
+        if (ratio <= 0.75) return 3;
+        return 4;
+      }
+
+      /**
+       * 把 `{'YYYY-MM-DD': token}` 摊成热力图网格（**纯函数**，便于离线测试）。
+       * 列 = 周（周一起始），行 = 星期一…日；最后一列是「本周」；未来的格子不生成。
+       * @param {object} byDate
+       * @param {{weeks?: number, today?: Date}} [options]
+       */
+      function heatmapGrid(byDate, options) {
+        const opts = options || {};
+        const weeks = opts.weeks || 53;
+        const today = opts.today instanceof Date ? opts.today : new Date();
+        const pitch = HEAT_CELL + HEAT_GAP;
+        const padLeft = 16; // 留给星期标签
+        const padTop = 13; // 留给月份标签
+        const source = byDate || {};
+        const todayKey = ymd(today);
+        const dow = (today.getDay() + 6) % 7; // 周一 = 0
+        const firstCol = new Date(today.getFullYear(), today.getMonth(), today.getDate() - dow - (weeks - 1) * 7);
+
+        const cells = [];
+        let max = 0;
+        let active = 0;
+        for (let w = 0; w < weeks; w += 1) {
+          for (let r = 0; r < 7; r += 1) {
+            const d = new Date(firstCol.getFullYear(), firstCol.getMonth(), firstCol.getDate() + w * 7 + r);
+            const k = ymd(d);
+            if (k > todayKey) continue; // 未来不画
+            const total = typeof source[k] === "number" ? source[k] : 0;
+            if (total > max) max = total;
+            if (total > 0) active += 1;
+            cells.push({ w, r, k, total });
+          }
+        }
+        // ⚠️ 分档必须等**扫完全部**拿到最终 max 之后再做。
+        //    边扫边算的话，早期日期会拿「当时的 max」去分档 —— 实测因此把
+        //    25/100 的那天算成最深档（颜色完全不对）。冒烟测试守住了这条。
+        for (const c of cells) {
+          c.level = heatLevel(c.total, max);
+          c.x = padLeft + c.w * pitch;
+          c.y = padTop + c.r * pitch;
+        }
+        return {
+          weeks,
+          pitch,
+          padLeft,
+          padTop,
+          width: padLeft + weeks * pitch - HEAT_GAP,
+          height: padTop + 7 * pitch - HEAT_GAP,
+          firstCol,
+          todayKey,
+          cells,
+          max,
+          active,
+        };
+      }
+
+      /**
+       * 贡献热力图（GitHub 那种小方格）：列 = 周，行 = 星期一…日。
+       * 手写 SVG、零图表库；颜色用 `--ach-accent` 的不同不透明度分级，明暗主题都成立。
+       * @param props.byDate `'YYYY-MM-DD' → token 总量`（已按当前模型筛选过）
+       * @param props.weeks  显示多少周（默认 53 = 约一年，正好铺满整行）
+       */
+      function ActivityHeatmap(props) {
+        const grid = heatmapGrid(props.byDate, { weeks: props.weeks || 53 });
+
+        const rects = grid.cells.map((c) =>
+          h(
+            "rect",
+            {
+              key: c.k,
+              x: c.x,
+              y: c.y,
+              width: HEAT_CELL,
+              height: HEAT_CELL,
+              rx: 2,
+              fill: c.level === 0 ? "var(--ach-bg-2)" : "var(--ach-accent)",
+              opacity: c.level === 0 ? 1 : HEAT_OPACITY[c.level],
+              stroke: c.level === 0 ? "var(--ach-border)" : "none",
+              strokeWidth: c.level === 0 ? 1 : 0,
+            },
+            h("title", null, c.k + " · " + (c.total > 0 ? formatTokens(c.total) + "（" + exactTokens(c.total) + "）" : "无消耗")),
+          ),
+        );
+
+        // 月份标签：只在月份变化的那一列打一个
+        const monthNodes = [];
+        let lastMonth = -1;
+        for (let w = 0; w < grid.weeks; w += 1) {
+          const d = new Date(grid.firstCol.getFullYear(), grid.firstCol.getMonth(), grid.firstCol.getDate() + w * 7);
+          if (d.getMonth() === lastMonth) continue;
+          lastMonth = d.getMonth();
+          monthNodes.push(
+            h(
+              "text",
+              { key: "m" + w, x: grid.padLeft + w * grid.pitch, y: 9, className: "ach-heat-label" },
+              (d.getMonth() === 0 ? d.getFullYear() + "年" : "") + (d.getMonth() + 1) + "月",
+            ),
+          );
+        }
+        // 星期标签：和 GitHub 一样只标 一/三/五
+        const DOW = ["一", "二", "三", "四", "五", "六", "日"];
+        const dayNodes = [0, 2, 4].map((r) =>
+          h("text", { key: "d" + r, x: 0, y: grid.padTop + r * grid.pitch + HEAT_CELL - 1, className: "ach-heat-label" }, DOW[r]),
+        );
 
         return h(
           "div",
-          { className: "ach-chart" },
-          h("svg", { viewBox: "0 0 " + width + " " + height, role: "img", "aria-label": "最近 " + dayCount + " 天 Token 用量" }, children),
+          { className: "ach-heat" },
+          h(
+            "svg",
+            {
+              viewBox: "0 0 " + grid.width + " " + grid.height,
+              width: "100%",
+              role: "img",
+              "aria-label": "最近 " + grid.weeks + " 周每日 Token 用量热力图",
+            },
+            monthNodes,
+            dayNodes,
+            rects,
+          ),
           h(
             "div",
-            { className: "ach-chart-foot" },
-            h("span", null, series[0]?.date || ""),
-            h("span", null, "峰值 " + formatTokens(max)),
-            h("span", null, series[series.length - 1]?.date || ""),
+            { className: "ach-heat-foot" },
+            h("span", null, "近 " + grid.weeks + " 周有消耗 " + grid.active + " 天 · 峰值 " + formatTokens(grid.max)),
+            h(
+              "span",
+              { className: "ach-heat-legend" },
+              h("span", null, "少"),
+              [0, 1, 2, 3, 4].map((lv) =>
+                h("i", {
+                  key: lv,
+                  className: "ach-heat-swatch",
+                  style: {
+                    background: lv === 0 ? "var(--ach-bg-2)" : "var(--ach-accent)",
+                    opacity: String(HEAT_OPACITY[lv]),
+                    border: lv === 0 ? "1px solid var(--ach-border)" : "none",
+                  },
+                }),
+              ),
+              h("span", null, "多"),
+            ),
           ),
         );
       }
@@ -1089,9 +1209,9 @@
                 "div",
                 { className: "ach-section-title" },
                 h("span", null, "Token 活动"),
-                h("span", { style: { fontSize: 12, fontWeight: 400, color: "var(--ach-fg-dim)" } }, "最近 30 天"),
+                h("span", { style: { fontSize: 12, fontWeight: 400, color: "var(--ach-fg-dim)" } }, "最近一年"),
               ),
-              h(ActivityChart, { byDate, dayCount: 30 }),
+              h(ActivityHeatmap, { byDate, weeks: 53 }),
               h(
                 "div",
                 { className: "ach-chart-foot", style: { paddingTop: 10 } },
@@ -1100,6 +1220,16 @@
                 h("span", null, "输入 " + formatTokens(totals.input)),
                 h("span", null, "输出 " + formatTokens(totals.output)),
                 h("span", null, "缓存读 " + formatTokens(totals.cacheRead)),
+                h(
+                  "span",
+                  null,
+                  "峰值时段 " + (details.peakHour === null || details.peakHour === undefined ? "—" : details.peakHour + " 点"),
+                ),
+                h(
+                  "span",
+                  null,
+                  "常用模型 " + (details.favoriteModel ? String(details.favoriteModel).split("::").pop() : "—"),
+                ),
               ),
             ),
 
@@ -1252,6 +1382,9 @@
 
       exports.apply = apply;
       exports.inject = ["slots", "remote"];
+      // 仅供离线冒烟断言**纯计算**部分（热力图网格、格式化、身份合并）。
+      // DSH 只读 apply / inject，多挂这几个键没有任何影响。
+      exports.__test = { ymd, heatmapGrid, heatLevel, formatTokens, exactTokens, resolveIdentity };
       return module.exports;
     },
   });
