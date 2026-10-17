@@ -337,5 +337,29 @@ console.log("=== 6. 热力图网格（纯计算，离线可断言） ===");
   ok("高度恒为 7 行", narrow.height === empty.height, `${narrow.height} vs ${empty.height}`);
 }
 
+console.log("=== 7. client 版本探测（账号接口的 version 字段） ===");
+{
+  const { captured, sandbox } = loadBundle();
+  const t = captured[0].factory(() => fakeReact).__test;
+  ok("暴露了 detectClientVersion", typeof t.detectClientVersion === "function");
+
+  // 没有 boot manifest → 退回常量（不能是空串，否则账号接口的必填字段就废了）
+  const fallback = t.detectClientVersion();
+  ok("没有 __DSH_BOOT__ 时退回合法 semver 常量", /^\d+\.\d+\.\d+/.test(fallback), fallback);
+
+  // 有 boot manifest → 用运行时真实版本（DSH 0.2.1-rc.2 起可用，比硬编码更准）
+  sandbox.window.__DSH_BOOT__ = { release: { version: "9.9.9-rc.1" } };
+  ok("有 __DSH_BOOT__.release.version 时优先用它", t.detectClientVersion() === "9.9.9-rc.1", t.detectClientVersion());
+
+  // 畸形值 → 仍然退回常量，绝不把垃圾塞给接口
+  sandbox.window.__DSH_BOOT__ = { release: { version: "not-a-version" } };
+  ok("畸形版本号退回常量", t.detectClientVersion() === fallback, t.detectClientVersion());
+
+  sandbox.window.__DSH_BOOT__ = {};
+  ok("release 缺失退回常量", t.detectClientVersion() === fallback, t.detectClientVersion());
+
+  delete sandbox.window.__DSH_BOOT__;
+}
+
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail === 0 ? 0 : 1);

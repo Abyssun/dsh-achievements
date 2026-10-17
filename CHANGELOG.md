@@ -7,6 +7,25 @@
 > 抽不到就直接**失败**（宁可发不出去，也不要一个没有更新说明的 Release）。
 > 段落格式：`## [<version>] - <date>`，到下一个 `## ` 为止。
 
+## [0.1.7] - 2026-10-17
+
+### 兼容
+
+- **适配 DSH `0.2.1-rc.2`**（桌面端 2026-10-17 更新）。逐项核对后确认**没有破坏性变更**，
+  插件无需改调用方式：
+  - 兼容门：`engines.dsh` 在就由它单独决定（我们的范围 `>=0.1.5-rc.2 <0.3.0` 覆盖 0.2.1-rc.2，
+    判定用 `semver.satisfies(..., { includePrerelease: true })`）；
+  - 投影 seam：`stateSchema` / `stateVersion` / `init(header, inheritedEventCount)` /
+    `apply(state, event)` / `stateOf(session, key)` 签名全未变；
+  - `sessionQuery`、`sessions` 服务与返回值形状未变；
+  - typert manifest：**部署侧真实 loader 实测放行**（2 个 invocation、4 个 strict codec）；
+  - 客户端：`__ModuleLoader__`、`main` / `sidebar.panellist` / `settings.plugins.tab` 槽位、
+    `remote.$mount`、remote 的 `{ok, value}` 信封都还在（官方客户端仍是 `result.ok` / `result.value`）；
+  - 会话日志命名仍是 `session.jsonl.zstd` 与 `.v3.` / `.v4.`，原始日志兜底照常可用。
+- 账号接口上报的 client 版本改为**运行时探测**：优先读 `window.__DSH_BOOT__.release.version`，
+  读不到才退回常量 —— 运行时升级后不会再上报旧版本号。
+- `smoke:compat` 的检查版本表加入 `0.2.1-rc.2`，避免"只验过旧版本"。
+
 ## [0.1.6] - 2026-10-13
 
 ### 修复

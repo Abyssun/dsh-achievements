@@ -48,12 +48,13 @@ client bundle 注入都发生在启动时。重启后左栏出现一个奖杯图
 > （`profile "desktop" is managed exclusively by the Electron application`），
 > 这种情况请用应用内的插件市场/插件管理安装。
 
-> ⚠️ **版本兼容门**：DSH 0.2.0 起会在安装时校验 `engines.dsh` 与**全部**
-> `@deepseek-ai/dsh*` peer，不命中就**拒绝安装**并回滚，提示形如
+> ⚠️ **版本兼容门**：DSH 0.2.0 起会在安装时校验 `engines.dsh`（声明了它就由它单独决定，
+> 否则校验**全部** `@deepseek-ai/dsh*` peer），不命中就**拒绝安装**并回滚，提示形如
 > `Plugin <name>@<ver> is incompatible with dsh <runtime>`。
 > 本插件声明覆盖 `0.1.5-rc.2` ~ `0.2.x`
 > （`@deepseek-ai/dsh: ">=0.1.5-rc.2 <0.3.0"`、
-> `@deepseek-ai/dsh-typert-protocol: "^0.1.5-rc.2 || ^0.2.0-rc.1"`）。
+> `@deepseek-ai/dsh-typert-protocol: "^0.1.5-rc.2 || ^0.2.0-rc.1"`），
+> 并已逐项验证 **`0.2.1-rc.2`**（当前桌面版）可用。
 
 ## 使用
 

@@ -46,10 +46,28 @@
   /** 允许的源图片上限。 */
   const MAX_SOURCE_BYTES = 8 * 1024 * 1024;
   /**
-   * 账号接口要求的 client 元数据里的 version 字段。
-   * 官方客户端由构建期内联；第三方插件没有，这里给一个合法 semver 即可（宿主只做转发）。
+   * 账号接口要求的 client 元数据里的 version 字段（兜底值）。
+   * 官方客户端由构建期内联；第三方插件优先从 `window.__DSH_BOOT__.release.version`
+   * 探测真实版本（见 detectClientVersion），拿不到才退回这个常量（宿主只做转发）。
    */
   const ACCOUNT_CLIENT_VERSION = "0.2.0-rc.2";
+
+  /**
+   * 取当前客户端的构建版本。
+   * DSH 的 boot manifest（`window.__DSH_BOOT__`）带 `release.version`（字符串），
+   * 比硬编码更准 —— 运行时升级后不会继续上报旧版本号。
+   */
+  function detectClientVersion() {
+    try {
+      const boot = typeof window !== "undefined" ? window.__DSH_BOOT__ : null;
+      const release = boot && boot.release;
+      const v = release && release.version;
+      if (typeof v === "string" && v !== "" && /^\d+\.\d+\.\d+/.test(v)) return v;
+    } catch {
+      /* 拿不到就退回常量 */
+    }
+    return ACCOUNT_CLIENT_VERSION;
+  }
 
   window.__ModuleLoader__.load({
     id: ACH_CLIENT_BUNDLE_ID,
@@ -289,7 +307,7 @@
         if (!namespace || typeof namespace.getProfile !== "function") return null;
         const locale = (typeof navigator !== "undefined" && navigator.language) || "zh-CN";
         const meta = {
-          version: ACCOUNT_CLIENT_VERSION,
+          version: detectClientVersion(),
           locale,
           timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60,
         };
@@ -1388,7 +1406,7 @@
       exports.inject = ["slots", "remote"];
       // 仅供离线冒烟断言**纯计算**部分（热力图网格、格式化、身份合并）。
       // DSH 只读 apply / inject，多挂这几个键没有任何影响。
-      exports.__test = { ymd, heatmapGrid, heatLevel, formatTokens, exactTokens, resolveIdentity };
+      exports.__test = { ymd, heatmapGrid, heatLevel, formatTokens, exactTokens, resolveIdentity, detectClientVersion };
       return module.exports;
     },
   });

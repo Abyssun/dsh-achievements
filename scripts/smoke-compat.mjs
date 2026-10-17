@@ -18,8 +18,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const pkgRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
-/** 开发过的运行时版本。本机实测：npm 目录里是 0.1.5-rc.2，而桌面应用真正跑的是 0.2.0-rc.2。 */
-const DEFAULT_TARGETS = ["0.1.5-rc.2", "0.2.0-rc.2"];
+/**
+ * 开发过的运行时版本。
+ * 0.1.5-rc.2：早期 npm 目录里那份；0.2.0-rc.2：桌面应用 2026-10-12 那版；
+ * 0.2.1-rc.2：桌面应用 2026-10-17 更新后的当前版本。
+ */
+const DEFAULT_TARGETS = ["0.1.5-rc.2", "0.2.0-rc.2", "0.2.1-rc.2"];
 
 async function importSemver() {
   try {
