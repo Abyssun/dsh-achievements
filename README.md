@@ -131,6 +131,7 @@ npm run e2e        # check + smoke
 推 `v*` 标签即自动发版：CI 校验 → `npm pack` → 建 GitHub Release，
 **Release 正文自动取用 `CHANGELOG.md` 里对应版本的段落**（缺段落会让发版失败）。
 所以发版前要改两处：`package.json` 的 `version`，以及 `CHANGELOG.md` 里的一段 `## [x.y.z]`。
+该段落只描述本次版本的改动，格式与语气见 `CHANGELOG.md` 顶部的「撰写约定」。
 
 ## License
 

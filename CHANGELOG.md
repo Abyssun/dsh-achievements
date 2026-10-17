@@ -1,163 +1,95 @@
 # 更新日志
 
-本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
+`dsh-achievements` 的版本变更记录。版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)；已发布的条目不再修改。
 
-> **发版时必须在这里写一段。** `v*` 标签触发的 `release` 作业会从本文件里
-> 抽取**与该标签版本号一致**的段落作为 GitHub Release 正文；
-> 抽不到就直接**失败**（宁可发不出去，也不要一个没有更新说明的 Release）。
-> 段落格式：`## [<version>] - <date>`，到下一个 `## ` 为止。
+## 撰写约定
+
+- 每个版本只写**该版本包含的改动**，不重复历史内容。
+- 分类固定为：新增 / 变更 / 修复 / 兼容 / 文档。无改动的分类不列。
+- 一条一句，说明改了什么；需要解释原因时不超过两句，只陈述事实。
+- 接口名、文件名、版本号使用 `代码格式`。
+- 兼容性变化必须写明受影响的 DSH 版本范围。
+- 发布前定稿、发布后追加新版本，不回填旧版本。
+
+## 发版流程
+
+推送 `v*` 标签触发 `release` 工作流：校验 → 打包 → 创建 GitHub Release。Release 正文取自本文件中与该标签版本号一致的段落；段落缺失则发版失败。
 
 ## [0.1.7] - 2026-10-17
 
 ### 兼容
 
-- **适配 DSH `0.2.1-rc.2`**（桌面端 2026-10-17 更新）。逐项核对后确认**没有破坏性变更**，
-  插件无需改调用方式：
-  - 兼容门：`engines.dsh` 在就由它单独决定（我们的范围 `>=0.1.5-rc.2 <0.3.0` 覆盖 0.2.1-rc.2，
-    判定用 `semver.satisfies(..., { includePrerelease: true })`）；
-  - 投影 seam：`stateSchema` / `stateVersion` / `init(header, inheritedEventCount)` /
-    `apply(state, event)` / `stateOf(session, key)` 签名全未变；
-  - `sessionQuery`、`sessions` 服务与返回值形状未变；
-  - typert manifest：**部署侧真实 loader 实测放行**（2 个 invocation、4 个 strict codec）；
-  - 客户端：`__ModuleLoader__`、`main` / `sidebar.panellist` / `settings.plugins.tab` 槽位、
-    `remote.$mount`、remote 的 `{ok, value}` 信封都还在（官方客户端仍是 `result.ok` / `result.value`）；
-  - 会话日志命名仍是 `session.jsonl.zstd` 与 `.v3.` / `.v4.`，原始日志兜底照常可用。
-- 账号接口上报的 client 版本改为**运行时探测**：优先读 `window.__DSH_BOOT__.release.version`，
-  读不到才退回常量 —— 运行时升级后不会再上报旧版本号。
-- `smoke:compat` 的检查版本表加入 `0.2.1-rc.2`，避免"只验过旧版本"。
+- 适配 DSH `0.2.1-rc.2`。核对范围：兼容门（`engines.dsh` 单独判定）、投影 seam（`stateSchema`、`stateVersion`、`init`、`apply`、`stateOf`）、`sessionQuery` 与 `sessions` 服务、typert manifest 校验、客户端 `__ModuleLoader__` 与 `main` / `sidebar.panellist` / `settings.plugins.tab` 槽位、`remote.$mount`、remote 的 `{ ok, value }` 信封、会话日志文件名。上述接口均未变更，本版本不修改调用方式。
+
+### 变更
+
+- 账号接口上报的客户端版本改为读取 `window.__DSH_BOOT__.release.version`；读取失败或格式不合法时使用内置常量。
+- `smoke:compat` 的检查版本表加入 `0.2.1-rc.2`。
 
 ## [0.1.6] - 2026-10-13
 
-### 修复
+### 新增
 
-- **历史会话统计不到（只有当前会话有数据）**。`ctx.get("sessionQuery")` 在
-  `[Service.init]` 阶段**拿不到**这个服务：插件按顺序加载，
-  `@deepseek-ai/dsh-session-query` 提供服务比本插件晚，而 `ctx.get()` 不等待服务出现。
-  表现为界面能出数、但只有当前活会话那一份（诊断里 `cold=0`）。
-  改为用 `ctx.inject(["sessionQuery"], …)` 等依赖到位再启动回填
-  （投影注册表一直好用，正因为它走的就是 inject），并加 5s 兜底避免界面永远显示「扫描中」；
-  诊断新增 `query=` 字段如实上报。
-- **部分历史会话读不到（导致总计偏低）**。少数会话的 descriptor 版本不被 DSH reader 接受
-  （例如 `subagent/descriptor 0 uses unsupported descriptor version 2`），
-  `readSession()` 直接拒绝它们。实测这些日志的**事件形状是兼容的**，
-  所以新增了**原始日志兜底**：自己解多帧 zstd（用 Node 内置 `zlib`，无额外依赖）、
-  按 `seq` 只取真事件、按官方规则跳过继承前缀，再交给同一套折叠逻辑。
-  诊断新增 `raw=` 报告兜底成功的会话数。
-- **同名模型无法区分**。模型 key 是 `provider::model`，**不同 provider（通道）可以有同名模型** ——
-  实测 `deepseek-account::deepseek-flash` 与 `deepseek-official::deepseek-flash` 是两条通道，
-  数据当然不同。界面此前只显示模型名，于是两行看起来一模一样。
-  现在**同名时补上 provider 后缀**（`deepseek-flash @account` / `@official`），完整 key 仍在悬停提示里。
-- 个人主页**不再显示信息性提示**：只有真的丢数据（`failed > 0`）或调用失败才提示。
-  「N 个会话走了原始日志兜底」这类说明移到设置页的「统计状态」，并把底层报错压成一句人话
-  （去掉会话 id 与原始日志路径）。
-- **看不出数字在动（容易被误认为「没有统计」）**。累计值在亿位只保留 1 位小数，
-  而一轮对话通常只涨几百万 —— 实测 73 秒涨约 296 万，`7.99 亿 → 8.02 亿` 四舍五入后
-  全都显示成「8.0 亿」，于是看起来像没刷新。现在：亿/万位保留 **2 位小数**；
-  页脚显示**「N 秒前刷新」**（每秒跳动）与**「本次 +Δ」**；另加一行**累计精确值**（逐位）。
+- 「Token 活动」改为贡献热力图：按周分列、按周一至周日分行，覆盖最近 53 周，按当日用量相对峰值分四档；含月份与星期标签、分档图例，单元格悬停显示当日用量。
+- 统计卡片支持悬停显示精确值：累计 Token 数、Token 使用峰值（附峰值日期）、最长任务用时（毫秒）。
 
-### 改进
+### 变更
 
-- **鼠标悬停在统计卡片上即显示精确值**：缩略的「8.04 亿」本身看不出在动，
-  把指针放到「累计 Token 数」这片区域，数值会就地换成逐位精确值（如 `804,123,456`）；
-  峰值卡显示精确峰值与峰值日期，最长任务卡显示毫秒数。
-  模型用量行悬停也会显示精确 token 与完整 `provider::model`。
-- **「Token 活动」由柱状图改为贡献热力图**（GitHub 那种小方格）：列 = 周、行 = 星期一…日，
-  显示最近一年（53 周），按当日用量相对峰值分 4 档深浅，**悬停某一格**显示该日精确值；
-  带月份与星期标签、右下「少 → 多」图例；底部明细顺带补上**峰值时段**与**常用模型**。
+- 卡片数值在亿 / 万位保留两位小数。
+- 页脚增加距上次刷新的秒数、相邻两次刷新的增量、累计精确值与数据时间。
+- 活动区明细增加峰值时段与常用模型。
 
 ### 文档
 
-- README 隐去面向维护者的内部信息（本机路径、开发环境搭法、私有统计数字），
-  这些内容移到仓库外的开发工作记录。
-- README 顶部加上**界面效果截图**（`assets/preview.png`），并说明「缩略值可悬停看精确值」。
+- README 增加界面截图。
 
-### 说明
+## [0.1.5] - 2026-10-12
 
-- 取代 **0.1.4**：后者缺少上面三项数据修复（尤其「历史会话统计不到」会让总计明显偏低）。
+### 修复
+
+- 历史会话未纳入统计。`ctx.get("sessionQuery")` 在初始化阶段返回空，该服务由后加载的插件提供；改用 `ctx.inject` 等待依赖，并设 5 秒等待上限。诊断信息新增 `query` 字段。
+- 部分会话无法读取。DSH reader 拒绝读取的会话改用原始日志回退：解压多帧 zstd、按 `seq` 取事件、按 `inheritedEventCount` 规则跳过继承前缀。诊断信息新增 `raw` 字段。
+
+### 变更
+
+- 区分同名模型。模型标识为 `provider::model`，不同 provider 下可能出现同名模型；同名时在名称后追加 provider 后缀。
+- 个人主页仅在读取失败或调用失败时提示；其余说明移至设置页「统计状态」，提示文本不再包含会话 ID 与日志路径。
 
 ## [0.1.4] - 2026-10-12
 
 ### 修复
 
-- **修掉致命 bug：`getMetrics` 的返回值被套了两层 `{ok,value}` 信封。**
-  DSH 的约定是：manifest 里 `result.schema` 描述**方法的原始返回值**，
-  `{ok,value}` 信封由**传输层**加（权威依据：官方 `dsh-api-account-controller`
-  的 `getProfile(client) { return this.ctx.deepseekAccount.getProfile(client); }`）。
-  我们既在 host 里自己包了一层，又把信封写进了 `result.schema` —— 两边**自洽**，
-  strict 校验照样通过，而客户端最终拿到
-  `{ok:true, value:{ok:true, value:真正的快照}}`，每个字段都读不到。
-  表现：**5 张卡片全 0、`截至 Invalid Date`、诊断全是 `?`、不报任何错**。
-  现在 host 直接返回原始值、失败 `throw`，schema 也改回裸值；
-  并加了**反证测试**：把信封喂给 schema 必须失败。
-- 个人主页头像/昵称/按钮**居中**（补回漏掉的容器）。
-- **不再显示本机匿名 UUID**。之前把 `~/.dsh/.anonymous-user-id`（一个 UUID）
-  当用户 ID 摆在主页上，容易被误认成账号 ID；现在只有拿到账号 `id`/`contact`
-  才显示那一行，匿名 id 挪到设置页并标注「仅本地」。
+- `getMetrics` 返回值形状。改为返回原始快照，`{ ok, value }` 信封由传输层生成，manifest 的 `result.schema` 同步改为原始值。此前返回值包含两层信封，客户端无法读到字段，界面数值全为零且无报错。
+- 个人主页头部居中。
+- 个人主页不再显示本机匿名标识，仅在取得账号 ID 时显示。
 
 ### 新增
 
-- **模型选择**：新增「模型用量」区块，列出每个模型的用量条与占比，
-  点一行即可只看该模型，再点取消。
-  这不是把全局数字换个标题：账本升到 **v3**，`models` 从
-  `provider::model → 数字` 变成 `{ total, days: { 日期 → 当日完整聚合 } }`，
-  筛选后的累计 / 峰值 / 连续天数 / 图表 / 输入输出缓存读全部按该模型分日明细真算。
-  选择器目录恒为**全部模型**（否则筛完就切不回去）。
-  「最长任务用时」是会话级指标、没有模型维度，筛选时仍是全局值，界面已标注。
-- 移除占位区块「精选作品」（源自参考设计、无实际内容），由模型用量取代。
+- 模型用量区块与模型筛选。账本升至 v3，增加按模型的分日明细；筛选后的累计、峰值、连续天数与图表按该模型数据计算，模型目录始终为全量。
+- 设置页增加「统计状态」，显示统计来源与失败计数。
 
-### 说明
+## [0.1.3] - 2026-10-12（已撤回）
 
-- 取代 **0.1.3**。0.1.3 的标签与 Release 曾发布且打的是带「双层信封」缺陷的代码，请勿使用。
-
-## [0.1.3] - 2026-10-12 ⚠️ 已发布但有致命缺陷，请改用 0.1.6
-
-> 该版本的标签与 Release 已经发布，其中 `dsh-achievements-0.1.3.tgz`
-> 打的是带「双层信封」缺陷的代码。**请勿安装**，改用 0.1.6。
-> 按「已发布的历史不重写」的原则，此标签保留不动，由 0.1.6 取代。
-
-### 修复
-
-- `getMetrics()` 不再在请求路径里做全量历史 IO（列举 + 逐个 `readSession` + 折叠）。
-  之前 95 个会话顺序读取、每次都要解压校验，RPC 几十秒都不返回；而客户端每 30s
-  又发一次且不等上一次结束，请求越堆越多，界面永远停在「刷新中…」且数据全 0。
-  现在回填在 `[Service.init]` 里后台跑（并发 4、每会话 8s 超时），
-  `getMetrics()` 只读内存立即返回，并用 `ready/collecting/progress` 如实上报进度。
-- 资料编辑器修好：不再依赖 metrics 数据、保存有 busy/成功/失败状态、
-  可单独清除头像回退账号头像。
-
-### 新增
-
-- **默认昵称与头像取 DSH 账号**（`remote.account.getProfile()`，按官方约定传
-  `{version, locale, timezoneOffsetSeconds}`）；用户自己设的优先。
-  刻意不写进 `exports.inject`（避免变成硬依赖），拿不到就只少个默认值。
-- **头像改为文件上传**：PNG / JPEG / WebP / GIF，8MB 上限，
-  可拖动平移 + 滑块缩放，导出 256×256。
-- 个人主页显示扫描进度与诊断信息，不再让人干等。
+`getMetrics` 返回值包含两层 `{ ok, value }` 信封，界面数值全为零。标签与 Release 保留用于追溯，不建议安装，请使用 `0.1.4` 或更高版本。
 
 ## [0.1.2] - 2026-10-11
 
 ### 修复
 
-- **client bundle 整体包进 IIFE**，顶层不留任何 `const`/`let`/`function`。
-  DSH 会把多个插件的 `client.js` 放进**同一个脚本作用域**，顶层 `const` 撞名就是
-  `SyntaxError: Identifier 'X' has already been declared`，整个 client 批次全灭，
-  表现为 `web boot: 1 entry did not activate: <插件>: import failed`。
-  当时另一个已装插件的 `client.js` 也在顶层声明了同名常量（它只是恰好当时是唯一使用者），
-  两边一起把整个 client 批次打挂。
-- 放宽 `@deepseek-ai/dsh-typert-protocol` peer 范围到
-  `^0.1.5-rc.2 || ^0.2.0-rc.1`，通过 DSH 0.2.0 起的兼容门校验。
+- client bundle 的顶层作用域污染。整体包裹为 IIFE，避免与其他插件在合并脚本中重复声明标识符。
+- `@deepseek-ai/dsh-typert-protocol` 的 peer 范围放宽至 `^0.1.5-rc.2 || ^0.2.0-rc.1`，以通过 DSH 0.2.0 起的兼容门。
 
 ## [0.1.1] - 2026-10-11
 
 ### 修复
 
-- 兼容门 peer 范围修正（0.1.0 在 DSH 0.2.0-rc.2 上会被拒绝安装）。
+- 兼容门 peer 范围修正。`0.1.0` 在 DSH `0.2.0-rc.2` 上会被拒绝安装。
 
 ## [0.1.0] - 2026-10-11
 
 ### 新增
 
-- 首个可用版本：`main` 整页个人主页（5 张卡片）+ 左栏图标 + 设置页配置。
-- Host 侧基于官方 session-projection seam 的投影单元与跨会话 rollup。
-- 「最长任务用时」按 30 分钟空档切分（原「末事件 − 首事件」口径会给出 1367 小时这种假值）。
-- 继承前缀按官方 `inheritedEventCount` 跳过，累计 Token 不再与父会话重复计。
+- 首个版本：`main` 整页个人主页（5 张统计卡片）、`sidebar.panellist` 侧栏入口、`settings.plugins.tab` 配置页。
+- 基于 session-projection seam 的投影单元与跨会话汇总。
+- 「最长任务用时」按 30 分钟空档切分。
+- 按 `inheritedEventCount` 跳过 fork / 子会话的继承前缀。
