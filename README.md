@@ -135,4 +135,4 @@ npm run e2e        # check + smoke
 
 ## License
 
-MIT
+[MIT](https://github.com/Abyssun/dsh-achievements?tab=MIT-1-ov-file)
